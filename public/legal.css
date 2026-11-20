@@ -1,0 +1,184 @@
+/* Shared styles for the static legal pages (privacy.html, data-deletion.html).
+   Mirrors the tokens in src/index.css so the pages match the app. */
+:root {
+  --pink: #e92968;
+  --pink-dark: #c91852;
+  --wine: #5f0a27;
+  --blush: #fff1f4;
+  --rose: #fbdce5;
+  --ink: #251a1e;
+  --muted: #74676c;
+  --line: #eadfe2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "DM Sans", sans-serif;
+  color: var(--ink);
+  background: #fffafa;
+  line-height: 1.65;
+}
+
+a {
+  color: var(--pink-dark);
+}
+
+.legal-header {
+  border-bottom: 1px solid var(--line);
+  background: white;
+}
+
+.legal-header-inner,
+.legal-main,
+.legal-footer {
+  width: min(760px, calc(100% - 32px));
+  margin-inline: auto;
+}
+
+.legal-header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 72px;
+}
+
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--wine);
+  text-decoration: none;
+}
+
+.logo-mark {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 14px 14px 14px 4px;
+  background: linear-gradient(145deg, var(--pink), #ba123f);
+  color: white;
+  font-family: "Playfair Display", serif;
+  font-style: italic;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.logo-type {
+  display: flex;
+  flex-direction: column;
+}
+
+.logo-type strong {
+  font-family: "Playfair Display", serif;
+  font-size: 20px;
+  font-style: italic;
+  line-height: 1;
+}
+
+.logo-type small {
+  margin-top: 4px;
+  color: var(--pink);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.27em;
+}
+
+.back-link {
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+}
+
+.legal-main {
+  padding: 48px 0 24px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: var(--pink-dark);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: clamp(30px, 6vw, 40px);
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+}
+
+.updated {
+  margin: 0 0 28px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.lead {
+  font-size: 17px;
+}
+
+h2 {
+  margin: 40px 0 10px;
+  font-size: 21px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+h3 {
+  margin: 22px 0 6px;
+  font-size: 16px;
+}
+
+p,
+ul,
+ol {
+  margin: 0 0 14px;
+}
+
+ul,
+ol {
+  padding-left: 22px;
+}
+
+li + li {
+  margin-top: 6px;
+}
+
+.callout {
+  margin: 24px 0;
+  padding: 18px 20px;
+  border: 1px solid var(--rose);
+  border-radius: 16px;
+  background: var(--blush);
+}
+
+.callout p:last-child {
+  margin-bottom: 0;
+}
+
+.legal-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  justify-content: space-between;
+  padding: 28px 0 44px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.legal-footer nav {
+  display: flex;
+  gap: 16px;
+}

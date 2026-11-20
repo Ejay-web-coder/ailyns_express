@@ -170,6 +170,10 @@ export function Landing({ onChoose }: { onChoose: (role: Role) => void }) {
       <footer className="landing-footer content-width">
         <Logo compact />
         <span>© {new Date().getFullYear()} Ailyn's Express · Your everyday food and grocery partner</span>
+        <nav className="legal-links" aria-label="Legal">
+          <a href="/privacy">Privacy Policy</a>
+          <a href="/data-deletion">Data Deletion</a>
+        </nav>
       </footer>
     </main>
   );

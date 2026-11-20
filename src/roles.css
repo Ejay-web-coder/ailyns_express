@@ -368,6 +368,19 @@ a.button {
   color: var(--muted);
   font-size: 12px;
 }
+.legal-links {
+  display: flex;
+  gap: 16px;
+}
+.legal-links a {
+  color: var(--muted);
+  font-weight: 600;
+  text-decoration: none;
+}
+.legal-links a:hover {
+  color: var(--pink-dark);
+  text-decoration: underline;
+}
 
 /* ------------------------------------------------------------ role auth */
 .auth-visual {
