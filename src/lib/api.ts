@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Product } from "../shared";
 import { supabase } from "./supabase";
-import type { ChatLog, ChatSuggestion, Order, OrderStatus, Profile, Role } from "./types";
+import type { ChatLog, ChatSuggestion, Order, OrderStatus, Profile, Role, StoreSettings } from "./types";
 
 const ORDER_SELECT = "*, order_items(*), order_events(*)";
 
@@ -231,6 +231,24 @@ export const riderUpdateStatus = (orderId: string, status: OrderStatus) =>
   rpc("rider_update_status", { p_order: orderId, p_status: status });
 export const riderUpdateLocation = (orderId: string, lat: number, lng: number) =>
   rpc("rider_update_location", { p_order: orderId, p_lat: lat, p_lng: lng });
+/** The customer's exact drop-off pin for their own order. */
+export const setOrderDropOff = (orderId: string, lat: number, lng: number) =>
+  rpc("customer_set_drop_off", { p_order: orderId, p_lat: lat, p_lng: lng });
+
+// ------------------------------------------------------------- store location
+
+/** The store row, or null when it can't be read (e.g. the live_route_map migration isn't applied yet). */
+export async function fetchStoreSettings(): Promise<StoreSettings | null> {
+  const { data, error } = await supabase.from("store_settings").select("*").eq("id", 1).maybeSingle();
+  return error ? null : (data as StoreSettings | null);
+}
+
+export async function updateStoreSettings(changes: Pick<StoreSettings, "address" | "lat" | "lng">) {
+  // .select() so an update that RLS silently skipped shows up as an error instead of a fake success.
+  return unwrap(
+    await supabase.from("store_settings").update(changes).eq("id", 1).select().single(),
+  ) as StoreSettings;
+}
 
 // ------------------------------------------------------------- chatbot
 

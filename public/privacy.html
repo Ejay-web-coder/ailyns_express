@@ -28,7 +28,7 @@
     <main class="legal-main">
       <p class="eyebrow">LEGAL</p>
       <h1>Privacy Policy</h1>
-      <p class="updated">Last updated: November 20, 2026</p>
+      <p class="updated">Last updated: November 26, 2026</p>
 
       <p class="lead">
         Ailyn's Express ("we", "us") delivers food and groceries in the Philippines. This policy explains what
@@ -67,6 +67,10 @@
         <li>The items you order, prices and totals.</li>
         <li>The delivery name, phone number, email, address, city, province and any delivery notes you enter.</li>
         <li>
+          If you choose to pin your drop-off on the map at checkout, the location of that pin. It is optional; you
+          can place the order without it.
+        </li>
+        <li>
           Your payment method (cash on delivery or GCash on arrival). We do not collect card numbers or GCash
           account details on this website.
         </li>
@@ -94,8 +98,8 @@
       <h3>Stored on your device</h3>
       <ul>
         <li>
-          Your browser keeps your cart, your last delivery address and your sign-in session, so you don't have to
-          enter them again. You can clear these at any time by clearing your browser's site data. We do not use
+          Your browser keeps your cart, your last delivery address, your sign-in session and where delivery
+          addresses were found on the map, so you don't have to enter or look them up again. You can clear these at any time by clearing your browser's site data. We do not use
           advertising or tracking cookies.
         </li>
       </ul>
@@ -128,7 +132,12 @@
       <ul>
         <li><strong>Supabase</strong>: database and sign-in. Data is stored on servers in Sydney, Australia.</li>
         <li><strong>Vercel</strong>: hosts this website.</li>
-        <li><strong>Google Maps</strong>: shows delivery addresses and rider locations on a map.</li>
+        <li>
+          <strong>OpenStreetMap</strong> services (map tiles, Nominatim address search and OSRM routing): draw the
+          delivery map and the route between the store, the rider and the drop-off. To do that, the browser
+          showing the map sends them map coordinates and, for orders without a drop-off pin, the delivery
+          address. We do not send names or phone numbers.
+        </li>
         <li><strong>Google</strong> and <strong>Facebook</strong>: only if you choose to sign in with them.</li>
         <li>
           <strong>Google Gemini</strong>: writes the answers in the Ailyn AI chat. When you ask a question, we send

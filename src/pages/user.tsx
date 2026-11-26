@@ -25,6 +25,7 @@ import {
   askAilynAI,
   type AiChatTurn,
   placeOrder,
+  setOrderDropOff,
   signOut,
   updateMyProfile,
   useRealtime,
@@ -42,6 +43,8 @@ import {
   trackingStages,
 } from "../lib/types";
 import { OrderDetailsModal, OrderItemsList, OrderMap } from "../components/OrderDetails";
+import { LocationPicker } from "../components/Maps";
+import { LatLng, geocodeOrderAddress } from "../lib/geo";
 
 const DELIVERY_FEE = 49;
 const WELCOME_DISCOUNT = 30;
@@ -1054,6 +1057,22 @@ export function Checkout({
   const [payment, setPayment] = useState<"cod" | "gcash">("cod");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [picking, setPicking] = useState(false);
+  const [pin, setPin] = useState<LatLng | null>(null);
+  const [pinHint, setPinHint] = useState<LatLng | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+
+  const openPicker = () => {
+    setPicking(true);
+    // Centre the map on the typed address while GPS (or the customer's tap) sets the pin.
+    const form = formRef.current;
+    const field = (name: string) => String((form?.elements.namedItem(name) as HTMLInputElement | null)?.value ?? "");
+    if (field("address").trim() && field("city").trim()) {
+      void geocodeOrderAddress({ address: field("address"), city: field("city"), province: field("province") }).then(
+        (point) => point && setPinHint(point),
+      );
+    }
+  };
 
   if (!cart.length) {
     return (
@@ -1086,10 +1105,18 @@ export function Checkout({
     setBusy(true);
     setError("");
     try {
-      const order = await placeOrder(
+      let order = await placeOrder(
         cart.map((item) => ({ product_id: item.id, quantity: item.quantity })),
         details,
       );
+      if (pin) {
+        // The order is placed either way; without the pin the map falls back to the typed address.
+        const pinned = await setOrderDropOff(order.id, pin.lat, pin.lng).then(
+          () => true,
+          () => false,
+        );
+        if (pinned) order = { ...order, dest_lat: pin.lat, dest_lng: pin.lng };
+      }
       onPlaced(order, details);
     } catch (err) {
       setError(errorMessage(err));
@@ -1099,7 +1126,7 @@ export function Checkout({
   };
 
   return (
-    <form className="checkout-page content-width" onSubmit={submit}>
+    <form className="checkout-page content-width" onSubmit={submit} ref={formRef}>
       <button type="button" className="back-link" onClick={() => navigate("cart")}>
         <Icon name="back" /> Back to cart
       </button>
@@ -1164,6 +1191,31 @@ export function Checkout({
                 Delivery notes
                 <textarea name="notes" placeholder="Landmark, gate color, or other helpful notes" />
               </label>
+              <div className="full-field pin-field">
+                <div className="pin-field-head">
+                  <div>
+                    <strong>Drop-off pin</strong>
+                    <small>Optional. Your rider gets the exact spot, and the live map draws the route to it.</small>
+                  </div>
+                  {picking ? (
+                    <button
+                      type="button"
+                      className="button button-outline"
+                      onClick={() => {
+                        setPicking(false);
+                        setPin(null);
+                      }}
+                    >
+                      Remove pin
+                    </button>
+                  ) : (
+                    <button type="button" className="button button-soft" onClick={openPicker}>
+                      <Icon name="location" size={16} /> Pin my location
+                    </button>
+                  )}
+                </div>
+                {picking && <LocationPicker value={pin} onChange={setPin} hint={pinHint} locateOnMount />}
+              </div>
             </div>
           </div>
           <div className="form-card">

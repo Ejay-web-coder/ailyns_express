@@ -450,7 +450,7 @@ function ActiveDeliveries({
           const beforePickup = ["confirmed", "preparing", "ready"].includes(order.status);
           return (
             <article className="delivery-card" key={order.id}>
-              <OrderMap order={order} height={220} />
+              <OrderMap order={order} viewer="rider" height={260} />
               <div className="delivery-body">
                 <div className="job-card-head">
                   <div>

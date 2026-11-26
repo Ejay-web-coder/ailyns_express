@@ -29,6 +29,7 @@ import {
   signOut,
   updateChatSuggestion,
   updateMyProfile,
+  updateStoreSettings,
   useRealtime,
 } from "../lib/api";
 import { errorMessage, supabase } from "../lib/supabase";
@@ -46,6 +47,8 @@ import {
   statusLabel,
 } from "../lib/types";
 import { OrderDetailsModal } from "../components/OrderDetails";
+import { LocationPicker } from "../components/Maps";
+import { LatLng, refreshStoreLocation, toLatLng, useStoreSettings } from "../lib/geo";
 
 const adminNav = [
   ["Dashboard", "dashboard"],
@@ -1836,6 +1839,7 @@ function AdminSettings({
     }
   };
   return (
+    <>
     <form onSubmit={save}>
       <div className="admin-page-head">
         <div>
@@ -1879,5 +1883,86 @@ function AdminSettings({
         </section>
       </div>
     </form>
+    <StoreLocationPanel notify={notify} />
+    </>
+  );
+}
+
+/** Where Ailyn's is. Every live map draws its routes from this pin. */
+function StoreLocationPanel({ notify }: { notify: Notify }) {
+  const store = useStoreSettings();
+  const saved = toLatLng(store.settings?.lat, store.settings?.lng);
+  const [point, setPoint] = useState<LatLng | null>(null);
+  const [address, setAddress] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const current = point ?? saved;
+  const dirty = point != null || address != null;
+
+  const save = async () => {
+    if (!current) {
+      notify("Drop the pin on Ailyn's store first", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateStoreSettings({
+        address: (address ?? store.settings?.address ?? "").trim() || null,
+        lat: current.lat,
+        lng: current.lng,
+      });
+      await refreshStoreLocation();
+      setPoint(null);
+      setAddress(null);
+      notify("Store location saved");
+    } catch (err) {
+      notify(errorMessage(err), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="panel store-location-panel">
+      <div className="store-location-head">
+        <div>
+          <h3>Ailyn's store location</h3>
+          <p>
+            The live map draws each delivery route from here. At the store, use your current location, or
+            tap the map and drag the pin onto the shop.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="button button-primary"
+          onClick={save}
+          disabled={busy || !dirty || store.status !== "ready"}
+        >
+          {busy ? "Saving…" : "Save location"}
+        </button>
+      </div>
+      {store.status === "loading" ? (
+        <Spinner label="Loading store location" />
+      ) : store.status === "missing" ? (
+        <p className="muted small-note">
+          The store location table isn't set up yet. Apply the <code>live_route_map</code> migration in
+          Supabase, then reload this page.
+        </p>
+      ) : (
+        <div className="field-grid">
+          <label className="full-field">
+            Store address
+            <input
+              value={address ?? store.settings?.address ?? ""}
+              onChange={(e) => setAddress(e.target.value)}
+              placeholder="Street, barangay, city"
+            />
+          </label>
+          <div className="full-field">
+            <LocationPicker value={current} onChange={setPoint} kind="store" height={320} />
+            {!saved && <small className="muted">Not set yet: the maps show only the rider and the customer.</small>}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }

@@ -1,52 +1,8 @@
 import { Icon, Status, imgFallback, money } from "../shared";
-import {
-  Order,
-  Profile,
-  directionsUrl,
-  formatDateTime,
-  formatTime,
-  mapEmbedUrl,
-  statusLabel,
-} from "../lib/types";
+import { Order, Profile, directionsUrl, formatDateTime, formatTime, statusLabel } from "../lib/types";
+import { OrderMap, Viewer } from "./Maps";
 
-/** Live map of the rider (or the drop-off address until the rider shares a location). */
-export function OrderMap({
-  order,
-  rider,
-  height = 300,
-}: {
-  order: Order;
-  rider?: Profile | null;
-  height?: number;
-}) {
-  const hasFix = order.rider_lat != null && order.rider_lng != null;
-  return (
-    <div className="live-map" style={{ height }}>
-      <iframe
-        key={`${order.rider_lat},${order.rider_lng}`}
-        title={`Map for order ${order.code}`}
-        src={mapEmbedUrl(order)}
-        loading="lazy"
-        referrerPolicy="no-referrer-when-downgrade"
-      />
-      <div className="live-map-card">
-        <span className={`live-dot ${hasFix ? "on" : ""}`} />
-        <div>
-          <strong>
-            {rider ? rider.full_name || "Your rider" : order.rider_id ? "Rider assigned" : "Finding a rider"}
-            {" · "}
-            {statusLabel[order.status]}
-          </strong>
-          <small>
-            {hasFix && order.rider_location_at
-              ? `Live rider location · updated ${formatTime(order.rider_location_at)}`
-              : "Showing the delivery address until the rider shares a live location"}
-          </small>
-        </div>
-      </div>
-    </div>
-  );
-}
+export { OrderMap };
 
 export function OrderTimeline({ order }: { order: Order }) {
   const events = order.order_events ?? [];
@@ -115,12 +71,14 @@ export function OrderDetailsModal({
   onClose,
   actions,
   showMap = false,
+  viewer = "admin",
 }: {
   order: Order;
   rider?: Profile | null;
   onClose: () => void;
   actions?: React.ReactNode;
   showMap?: boolean;
+  viewer?: Viewer;
 }) {
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -181,7 +139,7 @@ export function OrderDetailsModal({
             <a className="text-link" href={directionsUrl(order)} target="_blank" rel="noreferrer">
               Open directions in Google Maps ↗
             </a>
-            {showMap && <OrderMap order={order} rider={rider} height={220} />}
+            {showMap && <OrderMap order={order} rider={rider} viewer={viewer} height={260} />}
             <h3>Items</h3>
             <OrderItemsList order={order} />
           </div>

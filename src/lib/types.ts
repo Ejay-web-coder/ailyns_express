@@ -84,10 +84,22 @@ export type Order = {
   rider_lat: number | null;
   rider_lng: number | null;
   rider_location_at: string | null;
+  /** Drop-off pin the customer set at checkout (absent before the live_route_map migration). */
+  dest_lat?: number | null;
+  dest_lng?: number | null;
   created_at: string;
   updated_at: string;
   order_items?: OrderItem[];
   order_events?: OrderEvent[];
+};
+
+/** The single store row: where Ailyn's is, for the live map. */
+export type StoreSettings = {
+  id: number;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+  updated_at: string;
 };
 
 export const statusLabel: Record<OrderStatus, string> = {
@@ -151,15 +163,10 @@ export const itemsSummary = (items: OrderItem[] | undefined) => {
   return rest.length ? `${first.name} + ${rest.length} more` : first.name;
 };
 
-export const mapEmbedUrl = (order: Pick<Order, "rider_lat" | "rider_lng" | "address" | "city" | "province">) => {
-  const q =
-    order.rider_lat != null && order.rider_lng != null
-      ? `${order.rider_lat},${order.rider_lng}`
-      : `${order.address}, ${order.city}, ${order.province}, Philippines`;
-  return `https://maps.google.com/maps?q=${encodeURIComponent(q)}&z=15&output=embed`;
-};
-
-export const directionsUrl = (order: Pick<Order, "address" | "city" | "province">) =>
+/** Google Maps directions to the drop-off: the customer's pin when there is one, else the address. */
+export const directionsUrl = (order: Pick<Order, "address" | "city" | "province" | "dest_lat" | "dest_lng">) =>
   `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(
-    `${order.address}, ${order.city}, ${order.province}, Philippines`,
+    order.dest_lat != null && order.dest_lng != null
+      ? `${order.dest_lat},${order.dest_lng}`
+      : `${order.address}, ${order.city}, ${order.province}, Philippines`,
   )}`;
