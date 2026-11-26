@@ -551,7 +551,12 @@
 }
 .header-location div {
   display: flex;
+  min-width: 0;
   flex-direction: column;
+}
+.header-location > svg,
+.customer-header > button {
+  flex: 0 0 auto;
 }
 .header-location small {
   font-size: 8px;
@@ -590,6 +595,7 @@
 }
 .header-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   margin-left: 28px;
@@ -3336,7 +3342,7 @@
     padding: 0 22px;
   }
   .customer-header nav,
-  .header-cart {
+  .header-actions > .header-cart {
     display: none;
   }
   .header-location {
