@@ -59,6 +59,8 @@ export type OrderEvent = {
   order_id: string;
   status: OrderStatus;
   note: string | null;
+  /** Who caused it (null for system events). */
+  actor_id: string | null;
   actor_role: Role | null;
   created_at: string;
 };
@@ -79,6 +81,12 @@ export type Order = {
   payment_method: "cod" | "gcash";
   subtotal: number;
   delivery_fee: number;
+  /** Fee worked out at checkout, before a rider/admin adjustment (absent before the distance_delivery_fee migration). */
+  quoted_delivery_fee?: number | null;
+  /** Store → drop-off distance the fee was priced on; null for flat-fee orders. */
+  delivery_km?: number | null;
+  /** Why the fee was last adjusted. */
+  delivery_fee_note?: string | null;
   discount: number;
   total: number;
   rider_lat: number | null;
@@ -93,14 +101,25 @@ export type Order = {
   order_events?: OrderEvent[];
 };
 
-/** The single store row: where Ailyn's is, for the live map. */
+/** The single store row: where Ailyn's is (for the live map) and how delivery is priced. */
 export type StoreSettings = {
   id: number;
   address: string | null;
   lat: number | null;
   lng: number | null;
+  /** Fee rule; absent until the distance_delivery_fee migration is applied. */
+  delivery_base_fee?: number;
+  delivery_base_km?: number;
+  delivery_per_km?: number;
+  rider_fee_max_extra?: number;
   updated_at: string;
 };
+
+/** The admin-editable part of the store row. */
+export type FeeSettings = Pick<
+  Required<StoreSettings>,
+  "delivery_base_fee" | "delivery_base_km" | "delivery_per_km" | "rider_fee_max_extra"
+>;
 
 export const statusLabel: Record<OrderStatus, string> = {
   pending: "Pending",

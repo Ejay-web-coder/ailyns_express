@@ -37,6 +37,7 @@ import {
   ChatLog,
   ChatSuggestion,
   Order,
+  OrderEvent,
   OrderStatus,
   Profile,
   activeStatuses,
@@ -48,7 +49,9 @@ import {
 } from "../lib/types";
 import { OrderDetailsModal } from "../components/OrderDetails";
 import { LocationPicker } from "../components/Maps";
+import { DeliveryFeeEditor } from "../components/DeliveryFee";
 import { LatLng, refreshStoreLocation, toLatLng, useStoreSettings } from "../lib/geo";
+import { FeeRule, describeFeeRule, feeForKm, feeRule, hasFeeRule } from "../lib/fees";
 
 const adminNav = [
   ["Dashboard", "dashboard"],
@@ -116,6 +119,13 @@ export function AdminApp({
   const customers = profiles.filter((p) => p.role === "customer");
   const profileById = useMemo(() => new Map(profiles.map((p) => [p.id, p])), [profiles]);
   const pendingCount = orders.filter((o) => o.status === "pending").length;
+  const notices = useMemo(
+    () => adminNotices(orders, profiles, profileById, profile.id),
+    [orders, profiles, profileById, profile.id],
+  );
+  // An order opened from a notification, kept by id so it follows live updates.
+  const [openOrderId, setOpenOrderId] = useState<string | null>(null);
+  const openOrder = openOrderId ? (orders.find((o) => o.id === openOrderId) ?? null) : null;
 
   const go = (next: string) => {
     setSection(next);
@@ -168,10 +178,12 @@ export function AdminApp({
             <button aria-label="Go to products" onClick={() => go("Products")}>
               <Icon name="search" />
             </button>
-            <button aria-label="Pending orders" onClick={() => go("Orders")}>
-              <Icon name="bell" />
-              {pendingCount > 0 && <span />}
-            </button>
+            <NotificationBell
+              notices={notices}
+              seenKey={`ae_admin_notices_seen_${profile.id}`}
+              onOpenOrder={setOpenOrderId}
+              onGo={go}
+            />
             <div className="admin-avatar">{initials(profile.full_name)}</div>
           </div>
         </header>
@@ -224,6 +236,240 @@ export function AdminApp({
         </main>
       </div>
       {sidebarOpen && <button className="sidebar-scrim" aria-label="Close menu" onClick={() => setSidebarOpen(false)} />}
+      {openOrder && (
+        <AdminOrderModal
+          order={openOrder}
+          profileById={profileById}
+          notify={notify}
+          reload={loadOrders}
+          onClose={() => setOpenOrderId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ notifications
+
+type Notice = {
+  id: string;
+  at: string;
+  icon: string;
+  tone: "new" | "good" | "bad" | "info";
+  title: string;
+  text: string;
+  /** Opens this order when clicked… */
+  orderId?: string;
+  /** …or this admin section. */
+  section?: string;
+};
+
+const NOTICE_DAYS = 7;
+const NOTICE_LIMIT = 40;
+const time = (iso: string) => new Date(iso).getTime();
+
+/** What happened in the last week that this admin didn't do themselves: order activity and rider sign-ups. */
+function adminNotices(
+  orders: Order[],
+  profiles: Profile[],
+  profileById: Map<string, Profile>,
+  me: string,
+): Notice[] {
+  const since = Date.now() - NOTICE_DAYS * DAY;
+  const list: Notice[] = [];
+  for (const order of orders) {
+    for (const ev of order.order_events ?? []) {
+      if (ev.actor_id === me || time(ev.created_at) < since) continue;
+      list.push(orderNotice(order, ev, profileById));
+    }
+  }
+  for (const p of profiles) {
+    if (p.role !== "rider" || p.rider_approved || time(p.created_at) < since) continue;
+    list.push({
+      id: `rider-${p.id}`,
+      at: p.created_at,
+      icon: "bike",
+      tone: "new",
+      title: "Rider waiting for approval",
+      text: `${p.full_name || "A new rider"} signed up${p.vehicle ? ` · ${p.vehicle}` : ""}`,
+      section: "Riders",
+    });
+  }
+  return list.sort((a, b) => time(b.at) - time(a.at)).slice(0, NOTICE_LIMIT);
+}
+
+function orderNotice(order: Order, ev: OrderEvent, profileById: Map<string, Profile>): Notice {
+  const base = { id: `event-${ev.id}`, at: ev.created_at, orderId: order.id };
+  const code = `#${order.code}`;
+  const note = ev.note ?? statusLabel[ev.status];
+  const who =
+    (ev.actor_id && profileById.get(ev.actor_id)?.full_name) ||
+    (ev.actor_role === "rider" ? "The rider" : ev.actor_role === "customer" ? order.customer_name : "Someone");
+
+  if (note === "Order placed") {
+    return {
+      ...base,
+      icon: "bag",
+      tone: "new",
+      title: `New order ${code}`,
+      text: `${order.customer_name} · ${money(Number(order.total))} · ${itemsSummary(order.order_items)}`,
+    };
+  }
+  if (ev.status === "cancelled") {
+    return {
+      ...base,
+      icon: "close",
+      tone: "bad",
+      title: `Order ${code} cancelled`,
+      text: ev.actor_role === "customer" ? `${order.customer_name} cancelled it` : note,
+    };
+  }
+  if (ev.status === "delivered") {
+    return { ...base, icon: "check", tone: "good", title: `Order ${code} delivered`, text: `${who} delivered it to ${order.customer_name}` };
+  }
+  if (note.startsWith("Delivery fee changed")) {
+    return {
+      ...base,
+      icon: "wallet",
+      tone: "info",
+      title: `Delivery fee changed on ${code}`,
+      text: `${who} changed it ${note.slice("Delivery fee changed ".length)}`,
+    };
+  }
+  if (note === "Rider released the delivery") {
+    return { ...base, icon: "alert", tone: "bad", title: `${code} needs a new rider`, text: `${who} released the delivery` };
+  }
+  if (note === "Rider accepted the delivery") {
+    return { ...base, icon: "bike", tone: "info", title: `Rider accepted ${code}`, text: `${who} will deliver to ${order.city}` };
+  }
+  if (ev.status === "out_for_delivery") {
+    return { ...base, icon: "bike", tone: "info", title: `${code} is out for delivery`, text: `${who} picked up the order` };
+  }
+  return { ...base, icon: "orders", tone: "info", title: `Order ${code} · ${statusLabel[ev.status]}`, text: note };
+}
+
+function readSeen(key: string) {
+  try {
+    return Number(localStorage.getItem(key)) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function NotificationBell({
+  notices,
+  seenKey,
+  onOpenOrder,
+  onGo,
+}: {
+  notices: Notice[];
+  /** localStorage key for when this admin last opened the list. */
+  seenKey: string;
+  onOpenOrder: (orderId: string) => void;
+  onGo: (section: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [seenAt, setSeenAt] = useState(() => readSeen(seenKey));
+  // Items newer than this stay highlighted while the list is open, even though opening marks them read.
+  const [freshSince, setFreshSince] = useState(seenAt);
+  const wrap = useRef<HTMLDivElement>(null);
+  const unread = notices.filter((n) => time(n.at) > seenAt).length;
+
+  const markSeen = useCallback(() => {
+    const now = Date.now();
+    setSeenAt(now);
+    try {
+      localStorage.setItem(seenKey, String(now));
+    } catch {
+      // private mode etc.: unread counts just won't survive a reload
+    }
+  }, [seenKey]);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    markSeen();
+  }, [markSeen]);
+
+  const toggle = () => {
+    if (open) return close();
+    setFreshSince(seenAt);
+    markSeen();
+    setOpen(true);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, close]);
+
+  const pick = (n: Notice) => {
+    close();
+    if (n.orderId) onOpenOrder(n.orderId);
+    else if (n.section) onGo(n.section);
+  };
+
+  return (
+    <div className="notif-wrap" ref={wrap}>
+      <button
+        className="notif-bell"
+        aria-label={unread ? `Notifications, ${unread} new` : "Notifications"}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        onClick={toggle}
+      >
+        <Icon name="bell" />
+        {unread > 0 && <span>{unread > 9 ? "9+" : unread}</span>}
+      </button>
+      {open && (
+        <section className="notif-panel" role="dialog" aria-label="Notifications">
+          <div className="notif-head">
+            <strong>Notifications</strong>
+            <small>Last {NOTICE_DAYS} days</small>
+          </div>
+          {notices.length === 0 ? (
+            <div className="notif-empty">
+              <Icon name="bell" size={28} />
+              <strong>You're all caught up</strong>
+              <p>New orders, cancellations and rider updates will show up here.</p>
+            </div>
+          ) : (
+            <ul className="notif-list">
+              {notices.map((n) => (
+                <li key={n.id}>
+                  <button className={time(n.at) > freshSince ? "fresh" : ""} onClick={() => pick(n)}>
+                    <span className={`notif-icon ${n.tone}`}>
+                      <Icon name={n.icon} size={17} />
+                    </span>
+                    <span className="notif-text">
+                      <strong>{n.title}</strong>
+                      <small>{n.text}</small>
+                      <time dateTime={n.at}>{timeAgo(n.at)}</time>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button
+            className="notif-foot"
+            onClick={() => {
+              close();
+              onGo("Orders");
+            }}
+          >
+            Go to all orders
+          </button>
+        </section>
+      )}
     </div>
   );
 }
@@ -635,34 +881,77 @@ function OrderTable({
         </tbody>
       </table>
       {live && (
-        <OrderDetailsModal
+        <AdminOrderModal
           order={live}
-          rider={live.rider_id ? profileById.get(live.rider_id) : null}
+          profileById={profileById}
+          notify={notify}
+          reload={reload}
           onClose={() => setDetails(null)}
-          showMap
-          actions={
-            live.status === "pending" ? (
-              <>
-                <button className="button button-outline" onClick={() => changeStatus(live, "cancelled")}>
-                  Cancel order
-                </button>
-                <button className="button button-primary" onClick={() => changeStatus(live, "confirmed")}>
-                  Confirm order
-                </button>
-              </>
-            ) : live.status === "confirmed" ? (
-              <button className="button button-primary" onClick={() => changeStatus(live, "preparing")}>
-                Start preparing
-              </button>
-            ) : live.status === "preparing" ? (
-              <button className="button button-primary" onClick={() => changeStatus(live, "ready")}>
-                Ready for pickup
-              </button>
-            ) : undefined
-          }
         />
       )}
     </div>
+  );
+}
+
+/** An order's details with the admin's next-step buttons and fee editor. */
+function AdminOrderModal({
+  order,
+  profileById,
+  notify,
+  reload,
+  onClose,
+}: {
+  order: Order;
+  profileById: Map<string, Profile>;
+  notify: Notify;
+  reload?: () => void;
+  onClose: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const changeStatus = async (status: OrderStatus) => {
+    if (status === "cancelled" && !window.confirm(`Cancel order #${order.code}? Stock will be restored.`)) return;
+    setBusy(true);
+    try {
+      await adminUpdateStatus(order.id, status);
+      notify(`#${order.code} → ${statusLabel[status]}`);
+      reload?.();
+    } catch (e) {
+      notify(errorMessage(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const step = (status: OrderStatus, label: string) => (
+    <button className="button button-primary" disabled={busy} onClick={() => void changeStatus(status)}>
+      {label}
+    </button>
+  );
+
+  return (
+    <OrderDetailsModal
+      order={order}
+      rider={order.rider_id ? profileById.get(order.rider_id) : null}
+      onClose={onClose}
+      showMap
+      actions={
+        order.status === "pending" ? (
+          <>
+            <button className="button button-outline" disabled={busy} onClick={() => void changeStatus("cancelled")}>
+              Cancel order
+            </button>
+            {step("confirmed", "Confirm order")}
+          </>
+        ) : order.status === "confirmed" ? (
+          step("preparing", "Start preparing")
+        ) : order.status === "preparing" ? (
+          step("ready", "Ready for pickup")
+        ) : undefined
+      }
+    >
+      <DeliveryFeeEditor order={order} viewer="admin" notify={notify} onSaved={() => reload?.()} />
+    </OrderDetailsModal>
   );
 }
 
@@ -739,7 +1028,10 @@ function AdminOrders({
 }
 
 function downloadOrdersCsv(orders: Order[], profileById: Map<string, Profile>, name: string) {
-  const header = ["Order", "Placed", "Customer", "Phone", "City", "Status", "Rider", "Payment", "Subtotal", "Fee", "Discount", "Total"];
+  const header = [
+    "Order", "Placed", "Customer", "Phone", "City", "Status", "Rider", "Payment",
+    "Subtotal", "Distance km", "Checkout fee", "Fee", "Fee note", "Discount", "Total",
+  ];
   const rows = orders.map((o) => [
     o.code,
     o.created_at,
@@ -750,7 +1042,10 @@ function downloadOrdersCsv(orders: Order[], profileById: Map<string, Profile>, n
     (o.rider_id && profileById.get(o.rider_id)?.full_name) || "",
     o.payment_method,
     o.subtotal,
+    o.delivery_km ?? "",
+    o.quoted_delivery_fee ?? o.delivery_fee,
     o.delivery_fee,
+    o.delivery_fee_note ?? "",
     o.discount,
     o.total,
   ]);
@@ -1884,7 +2179,120 @@ function AdminSettings({
       </div>
     </form>
     <StoreLocationPanel notify={notify} />
+    <DeliveryFeePanel notify={notify} />
     </>
+  );
+}
+
+/** How delivery is priced: a base fee for the first km, then a rate per extra km, plus the riders' allowance. */
+function DeliveryFeePanel({ notify }: { notify: Notify }) {
+  const store = useStoreSettings();
+  const saved = feeRule(store.settings);
+  const [draft, setDraft] = useState<Partial<Record<keyof FeeRule, string>>>({});
+  const [busy, setBusy] = useState(false);
+  const ready = store.status === "ready" && hasFeeRule(store.settings);
+  const hasStorePin = toLatLng(store.settings?.lat, store.settings?.lng) != null;
+
+  const text = (key: keyof FeeRule) => draft[key] ?? String(saved[key]);
+  const parsed = (key: keyof FeeRule) => {
+    const raw = text(key).trim();
+    return raw === "" ? NaN : Number(raw);
+  };
+  const next: FeeRule = {
+    baseFee: parsed("baseFee"),
+    baseKm: parsed("baseKm"),
+    perKm: parsed("perKm"),
+    riderMaxExtra: parsed("riderMaxExtra"),
+  };
+  const valid = Object.values(next).every((v) => Number.isFinite(v) && v >= 0 && v <= 10000) && next.baseKm <= 500;
+  const dirty = Object.keys(draft).length > 0;
+  const preview = valid ? next : saved;
+
+  const save = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!valid) {
+      notify("Enter amounts from 0 to 10,000 (and at most 500 km)", "error");
+      return;
+    }
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    setBusy(true);
+    try {
+      await updateStoreSettings({
+        delivery_base_fee: round2(next.baseFee),
+        delivery_base_km: round2(next.baseKm),
+        delivery_per_km: round2(next.perKm),
+        rider_fee_max_extra: round2(next.riderMaxExtra),
+      });
+      await refreshStoreLocation();
+      setDraft({});
+      notify("Delivery fee saved. New orders use it right away.");
+    } catch (err) {
+      notify(errorMessage(err), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const field = (key: keyof FeeRule, label: string) => (
+    <label>
+      {label}
+      <input
+        type="number"
+        inputMode="decimal"
+        min={0}
+        step="any"
+        value={text(key)}
+        onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
+        required
+      />
+    </label>
+  );
+
+  return (
+    <form className="panel store-location-panel" onSubmit={save}>
+      <div className="store-location-head">
+        <div>
+          <h3>Delivery fee</h3>
+          <p>
+            Worked out from the road distance between the store pin and the customer's drop-off. Riders can
+            raise it for heavy, bulky or many items, up to the allowance below, and must give a reason the
+            customer sees.
+          </p>
+        </div>
+        <button type="submit" className="button button-primary" disabled={busy || !dirty || !ready}>
+          {busy ? "Saving…" : "Save fee"}
+        </button>
+      </div>
+      {store.status === "loading" ? (
+        <Spinner label="Loading delivery fee" />
+      ) : !ready ? (
+        <p className="muted small-note">
+          Distance pricing isn't set up yet. Apply the <code>distance_delivery_fee</code> migration in
+          Supabase, then reload this page. Until then every order pays a flat {money(saved.baseFee)}.
+        </p>
+      ) : (
+        <>
+          <div className="field-grid">
+            {field("baseFee", "Base fee (₱)")}
+            {field("baseKm", "Base fee covers the first (km)")}
+            {field("perKm", "Each extra km (₱)")}
+            {field("riderMaxExtra", "Riders can add up to (₱)")}
+          </div>
+          <div className="fee-examples">
+            {[1, 3, 5, 8, 12].map((km) => (
+              <span key={km}>
+                {km} km <b>{money(feeForKm(km, preview))}</b>
+              </span>
+            ))}
+          </div>
+          <small className="muted">
+            {hasStorePin
+              ? `Customers pay ${describeFeeRule(preview)}.`
+              : `Set the store location above first. Until then every order pays a flat ${money(preview.baseFee)}.`}
+          </small>
+        </>
+      )}
+    </form>
   );
 }
 

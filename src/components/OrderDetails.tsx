@@ -1,6 +1,7 @@
 import { Icon, Status, imgFallback, money } from "../shared";
 import { Order, Profile, directionsUrl, formatDateTime, formatTime, statusLabel } from "../lib/types";
 import { OrderMap, Viewer } from "./Maps";
+import { feeWasAdjusted, formatKm } from "../lib/fees";
 
 export { OrderMap };
 
@@ -47,9 +48,17 @@ export function OrderItemsList({ order }: { order: Order }) {
           <span>{money(Number(order.subtotal))}</span>
         </div>
         <div>
-          <span>Delivery fee</span>
+          <span>
+            Delivery fee{order.delivery_km != null ? ` · ${formatKm(Number(order.delivery_km))}` : ""}
+          </span>
           <span>{money(Number(order.delivery_fee))}</span>
         </div>
+        {feeWasAdjusted(order) && (
+          <p className="fee-adjusted">
+            Changed from {money(Number(order.quoted_delivery_fee))}
+            {order.delivery_fee_note ? `: ${order.delivery_fee_note}` : ""}
+          </p>
+        )}
         {Number(order.discount) > 0 && (
           <div className="discount">
             <span>Discount</span>
@@ -72,6 +81,7 @@ export function OrderDetailsModal({
   actions,
   showMap = false,
   viewer = "admin",
+  children,
 }: {
   order: Order;
   rider?: Profile | null;
@@ -79,6 +89,8 @@ export function OrderDetailsModal({
   actions?: React.ReactNode;
   showMap?: boolean;
   viewer?: Viewer;
+  /** Extra controls under the items (e.g. the admin's delivery fee editor). */
+  children?: React.ReactNode;
 }) {
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -142,6 +154,7 @@ export function OrderDetailsModal({
             {showMap && <OrderMap order={order} rider={rider} viewer={viewer} height={260} />}
             <h3>Items</h3>
             <OrderItemsList order={order} />
+            {children}
           </div>
           <div>
             <h3>Timeline</h3>

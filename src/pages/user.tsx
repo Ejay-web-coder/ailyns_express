@@ -24,8 +24,8 @@ import {
   logChat,
   askAilynAI,
   type AiChatTurn,
+  type DropOff,
   placeOrder,
-  setOrderDropOff,
   signOut,
   updateMyProfile,
   useRealtime,
@@ -44,9 +44,10 @@ import {
 } from "../lib/types";
 import { OrderDetailsModal, OrderItemsList, OrderMap } from "../components/OrderDetails";
 import { LocationPicker } from "../components/Maps";
-import { LatLng, geocodeOrderAddress } from "../lib/geo";
+import { LatLng, geocodeOrderAddress, toLatLng, useGeocodedAddress, useStoreSettings } from "../lib/geo";
+import { describeFeeRule, feeRule, formatKm, hasFeeRule, useDeliveryQuote } from "../lib/fees";
 
-const DELIVERY_FEE = 49;
+// Keep in sync with place_order() in the migrations.
 const WELCOME_DISCOUNT = 30;
 
 const priceRanges = [
@@ -940,6 +941,8 @@ export function Cart({
   remove: (id: number) => void;
   navigate: (p: Page) => void;
 }) {
+  // No address yet: with distance pricing on this says "calculated at checkout".
+  const quote = useDeliveryQuote(null);
   return (
     <div className="checkout-page content-width">
       <div className="page-title">
@@ -979,7 +982,17 @@ export function Cart({
               </article>
             ))}
           </section>
-          <OrderSummary subtotal={subtotal} fee={DELIVERY_FEE} discount={discount}>
+          <OrderSummary
+            subtotal={subtotal}
+            fee={quote.status === "flat" ? quote.fee : null}
+            feeText="At checkout"
+            feeDetail={
+              quote.status === "flat" || quote.status === "loading"
+                ? undefined
+                : `Based on distance: ${describeFeeRule(quote.rule)}.`
+            }
+            discount={discount}
+          >
             <button className="button button-primary button-full" onClick={() => navigate("checkout")}>
               Proceed to checkout <Icon name="arrow" />
             </button>
@@ -1002,11 +1015,16 @@ export function Cart({
 export function OrderSummary({
   subtotal,
   fee,
+  feeText = "Calculating…",
+  feeDetail,
   discount,
   children,
 }: {
   subtotal: number;
-  fee: number;
+  /** null while the fee isn't known yet: `feeText` is shown and the total leaves delivery out. */
+  fee: number | null;
+  feeText?: string;
+  feeDetail?: string;
   discount: number;
   children?: React.ReactNode;
 }) {
@@ -1019,8 +1037,9 @@ export function OrderSummary({
       </div>
       <div>
         <span>Delivery fee</span>
-        <strong>{money(fee)}</strong>
+        <strong>{fee == null ? feeText : money(fee)}</strong>
       </div>
+      {feeDetail && <p className="fee-detail">{feeDetail}</p>}
       {discount > 0 && (
         <div className="discount">
           <span>First order discount</span>
@@ -1028,8 +1047,8 @@ export function OrderSummary({
         </div>
       )}
       <div className="summary-total">
-        <span>Total</span>
-        <strong>{money(Math.max(0, subtotal + fee - discount))}</strong>
+        <span>{fee == null ? "Total before delivery" : "Total"}</span>
+        <strong>{money(Math.max(0, subtotal + (fee ?? 0) - discount))}</strong>
       </div>
       {children}
       <p className="secure-note">Prices and stock are confirmed when you place the order</p>
@@ -1060,17 +1079,38 @@ export function Checkout({
   const [picking, setPicking] = useState(false);
   const [pin, setPin] = useState<LatLng | null>(null);
   const [pinHint, setPinHint] = useState<LatLng | null>(null);
+  const [notice, setNotice] = useState("");
   const formRef = useRef<HTMLFormElement>(null);
+
+  // The delivery fee follows the drop-off: the pin when there is one, else the typed address
+  // looked up on the map (re-read when the customer leaves an address field).
+  const [typed, setTyped] = useState<SavedAddress>(address);
+  const looked = useGeocodedAddress(typed);
+  const dropPoint: LatLng | null = pin ?? looked.point;
+  const quote = useDeliveryQuote(dropPoint);
+  const hasTypedAddress = !!typed.address.trim() && !!typed.city.trim();
+
+  const readTyped = (): SavedAddress => {
+    const form = formRef.current;
+    const field = (name: string) => String((form?.elements.namedItem(name) as HTMLInputElement | null)?.value ?? "");
+    return { address: field("address"), city: field("city"), province: field("province") };
+  };
+  const sameAddress = (a: SavedAddress, b: SavedAddress) =>
+    a.address.trim() === b.address.trim() && a.city.trim() === b.city.trim() && a.province.trim() === b.province.trim();
+  /** Re-price for the typed address. Returns true when it changed. */
+  const syncTyped = () => {
+    const next = readTyped();
+    if (sameAddress(next, typed)) return false;
+    setTyped(next);
+    return true;
+  };
 
   const openPicker = () => {
     setPicking(true);
     // Centre the map on the typed address while GPS (or the customer's tap) sets the pin.
-    const form = formRef.current;
-    const field = (name: string) => String((form?.elements.namedItem(name) as HTMLInputElement | null)?.value ?? "");
-    if (field("address").trim() && field("city").trim()) {
-      void geocodeOrderAddress({ address: field("address"), city: field("city"), province: field("province") }).then(
-        (point) => point && setPinHint(point),
-      );
+    const typedNow = readTyped();
+    if (typedNow.address.trim() && typedNow.city.trim()) {
+      void geocodeOrderAddress(typedNow).then((point) => point && setPinHint(point));
     }
   };
 
@@ -1102,21 +1142,42 @@ export function Checkout({
       notes: String(data.get("notes") ?? ""),
       payment,
     };
-    setBusy(true);
     setError("");
+    setNotice("");
+    // Never place an order on a fee the customer hasn't seen.
+    if (!pin && syncTyped()) {
+      setNotice("We updated the delivery fee for your address. Check it, then place your order.");
+      return;
+    }
+    if (quote.status === "need-location" && !pin && looked.searching) {
+      setNotice("Still finding your address on the map. Place your order once the delivery fee shows.");
+      return;
+    }
+    if (quote.status === "need-location") {
+      setError(
+        hasTypedAddress
+          ? "We couldn't find your address on the map. Pin your location so we can work out the delivery fee."
+          : "Enter your address or pin your location so we can work out the delivery fee.",
+      );
+      if (!picking) openPicker();
+      return;
+    }
+    if (quote.status === "loading" || quote.status === "measuring") {
+      setNotice("Still working out the delivery fee. Place your order once it shows.");
+      return;
+    }
+    const dropOff: DropOff | null = pin
+      ? { lat: pin.lat, lng: pin.lng, pinned: true, roadKm: quote.status === "ready" ? quote.roadKm : null }
+      : quote.status === "ready" && looked.point
+        ? { lat: looked.point.lat, lng: looked.point.lng, pinned: false, roadKm: quote.roadKm }
+        : null;
+    setBusy(true);
     try {
-      let order = await placeOrder(
+      const order = await placeOrder(
         cart.map((item) => ({ product_id: item.id, quantity: item.quantity })),
         details,
+        dropOff,
       );
-      if (pin) {
-        // The order is placed either way; without the pin the map falls back to the typed address.
-        const pinned = await setOrderDropOff(order.id, pin.lat, pin.lng).then(
-          () => true,
-          () => false,
-        );
-        if (pinned) order = { ...order, dest_lat: pin.lat, dest_lng: pin.lng };
-      }
       onPlaced(order, details);
     } catch (err) {
       setError(errorMessage(err));
@@ -1177,15 +1238,27 @@ export function Checkout({
                   required
                   autoComplete="street-address"
                   placeholder="23 Mabini Street, Barangay Dolores"
+                  onBlur={syncTyped}
                 />
               </label>
               <label>
                 City
-                <input name="city" defaultValue={address.city} required autoComplete="address-level2" />
+                <input
+                  name="city"
+                  defaultValue={address.city}
+                  required
+                  autoComplete="address-level2"
+                  onBlur={syncTyped}
+                />
               </label>
               <label>
                 Province
-                <input name="province" defaultValue={address.province} autoComplete="address-level1" />
+                <input
+                  name="province"
+                  defaultValue={address.province}
+                  autoComplete="address-level1"
+                  onBlur={syncTyped}
+                />
               </label>
               <label className="full-field">
                 Delivery notes
@@ -1195,7 +1268,10 @@ export function Checkout({
                 <div className="pin-field-head">
                   <div>
                     <strong>Drop-off pin</strong>
-                    <small>Optional. Your rider gets the exact spot, and the live map draws the route to it.</small>
+                    <small>
+                      Your rider gets the exact spot, the live map draws the route to it, and the delivery fee is
+                      worked out from it.
+                    </small>
                   </div>
                   {picking ? (
                     <button
@@ -1214,7 +1290,17 @@ export function Checkout({
                     </button>
                   )}
                 </div>
-                {picking && <LocationPicker value={pin} onChange={setPin} hint={pinHint} locateOnMount />}
+                {picking && (
+                  <LocationPicker
+                    value={pin}
+                    onChange={(next) => {
+                      setPin(next);
+                      setError("");
+                    }}
+                    hint={pinHint}
+                    locateOnMount
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -1244,7 +1330,31 @@ export function Checkout({
             </div>
           </div>
         </section>
-        <OrderSummary subtotal={subtotal} fee={DELIVERY_FEE} discount={discount}>
+        <OrderSummary
+          subtotal={subtotal}
+          fee={quote.status === "ready" || quote.status === "flat" ? quote.fee : null}
+          feeText={
+            quote.status === "need-location" && !looked.searching
+              ? hasTypedAddress
+                ? "Pin your location"
+                : "Enter your address"
+              : "Calculating…"
+          }
+          feeDetail={
+            quote.status === "ready"
+              ? `${formatKm(quote.km)} from Ailyn's ${
+                  pin
+                    ? "to your pin"
+                    : looked.point?.approximate
+                      ? "(estimated from your city: pin your location for the exact fee)"
+                      : "to your address"
+                } · ${describeFeeRule(quote.rule)}`
+              : quote.status === "need-location" && hasTypedAddress && !looked.searching
+                ? "We couldn't find your address on the map. Pin your location to see the delivery fee."
+                : undefined
+          }
+          discount={discount}
+        >
           <div className="summary-items">
             {cart.slice(0, 3).map((item) => (
               <div key={item.id}>
@@ -1257,6 +1367,7 @@ export function Checkout({
             {cart.length > 3 && <small>+{cart.length - 3} more</small>}
           </div>
           {error && <p className="form-error">{error}</p>}
+          {notice && !error && <p className="form-note">{notice}</p>}
           <button className="button button-primary button-full" type="submit" disabled={busy}>
             {busy ? "Placing order…" : "Place order"}
           </button>
@@ -1804,6 +1915,7 @@ export function Chatbot({
   const [thinking, setThinking] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
+  const store = useStoreSettings();
 
   useEffect(() => {
     let live = true;
@@ -1839,8 +1951,12 @@ export function Chatbot({
           });
     }
     if (has("fee", "shipping", "delivery cost", "delivery charge", "how much is delivery")) {
+      const rule = feeRule(store.settings);
+      const byDistance = hasFeeRule(store.settings) && toLatLng(store.settings?.lat, store.settings?.lng) != null;
       return bot(
-        `Delivery is a flat ${money(DELIVERY_FEE)}, and your first order gets ${money(WELCOME_DISCOUNT)} off automatically.`,
+        byDistance
+          ? `Delivery depends on how far you are from Ailyn's: ${describeFeeRule(rule)}. Checkout shows your exact fee once you enter your address or pin your location. For heavy or bulky orders your rider may adjust it, and you'll see the change and the reason on your order. Your first order gets ${money(WELCOME_DISCOUNT)} off automatically.`
+          : `Delivery is a flat ${money(rule.baseFee)}, and your first order gets ${money(WELCOME_DISCOUNT)} off automatically.`,
       );
     }
     if (has("discount", "promo", "voucher", "coupon")) {

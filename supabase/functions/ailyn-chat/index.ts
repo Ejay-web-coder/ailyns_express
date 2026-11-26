@@ -14,9 +14,10 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const MODEL = (Deno.env.get("GEMINI_MODEL")?.trim() || "gemini-3.5-flash-lite").replace(/^models\//, "");
-// Keep in sync with place_order() in the core migration and DELIVERY_FEE / WELCOME_DISCOUNT in user.tsx.
-const DELIVERY_FEE = 49;
+// Keep in sync with place_order() in the migrations, WELCOME_DISCOUNT in user.tsx and
+// DEFAULT_FEE_RULE in src/lib/fees.ts. The live fee rule is read from store_settings.
 const WELCOME_DISCOUNT = 30;
+const DEFAULT_BASE_FEE = 49;
 // Per-customer limits that protect the Gemini quota and bill.
 const PER_MINUTE = 8;
 const PER_DAY = 80;
@@ -86,11 +87,34 @@ type Order = {
   status: string;
   created_at: string;
   total: number;
+  delivery_fee: number;
   payment_method: string;
   order_items: { name: string; quantity: number }[] | null;
 };
 
-function systemPrompt(products: Product[], orders: Order[], welcomeEligible: boolean) {
+/** The store row's fee columns; null when they can't be read (migration not applied yet). */
+type FeeRow = {
+  lat: number | null;
+  delivery_base_fee: number;
+  delivery_base_km: number;
+  delivery_per_km: number;
+} | null;
+
+function deliveryFeeFact(row: FeeRow) {
+  const base = Number(row?.delivery_base_fee ?? DEFAULT_BASE_FEE);
+  if (!row || row.lat == null || Number(row.delivery_per_km) <= 0) {
+    return `${peso(base)} flat on every order.`;
+  }
+  const baseKm = Number(row.delivery_base_km);
+  const perKm = Number(row.delivery_per_km);
+  const rule =
+    baseKm > 0
+      ? `${peso(base)} for the first ${baseKm} km, then ${peso(perKm)} for each extra km started`
+      : `${peso(base)} plus ${peso(perKm)} per km started`;
+  return `depends on the road distance from Ailyn's store to the customer: ${rule}. Checkout shows the exact fee once the customer enters their address or pins their location; it can't be quoted here without one. For heavy, bulky or many items the rider may adjust the fee; the customer sees the new fee and the reason on their order.`;
+}
+
+function systemPrompt(products: Product[], orders: Order[], welcomeEligible: boolean, feeRow: FeeRow) {
   const catalog = products
     .map((p) =>
       [
@@ -117,6 +141,7 @@ function systemPrompt(products: Product[], orders: Order[], welcomeEligible: boo
             STATUS[o.status] ?? o.status,
             `placed ${manilaTime(o.created_at)}`,
             `total ${peso(o.total)}`,
+            `delivery fee ${peso(o.delivery_fee)}`,
             o.payment_method === "gcash" ? "GCash on arrival" : "cash on delivery",
             items ? `items: ${items}` : "",
           ]
@@ -147,7 +172,7 @@ Reply fields
 
 Store facts
 - Now: ${manilaTime()} (Philippine time).
-- Delivery fee: ${peso(DELIVERY_FEE)} flat on every order.
+- Delivery fee: ${deliveryFeeFact(feeRow)}
 - Welcome discount: ${peso(WELCOME_DISCOUNT)} off a customer's first order, applied automatically at checkout. ${
     welcomeEligible
       ? "This customer hasn't ordered yet, so their next order gets it."
@@ -161,7 +186,7 @@ Store facts
 Catalog (#id | name | type · category | price | stock | rating | description | ingredients)
 ${catalog || "The catalog is empty right now."}
 
-This customer's recent orders, newest first (code | status | placed | total | payment | items)
+This customer's recent orders, newest first (code | status | placed | total | delivery fee | payment | items)
 ${orderLines}`;
 }
 
@@ -230,7 +255,7 @@ Deno.serve(async (req) => {
     }
 
     // ---- grounding data, read as the customer
-    const [catalogRes, ordersRes, placedRes] = await Promise.all([
+    const [catalogRes, ordersRes, placedRes, feeRes] = await Promise.all([
       supabase
         .from("products")
         .select("id, name, type, category, price, stock, rating, description, ingredients")
@@ -241,7 +266,7 @@ Deno.serve(async (req) => {
         .limit(400),
       supabase
         .from("orders")
-        .select("code, status, created_at, total, payment_method, order_items(name, quantity)")
+        .select("code, status, created_at, total, delivery_fee, payment_method, order_items(name, quantity)")
         .eq("customer_id", user.id)
         .order("created_at", { ascending: false })
         .limit(5),
@@ -250,12 +275,19 @@ Deno.serve(async (req) => {
         .select("id", { count: "exact", head: true })
         .eq("customer_id", user.id)
         .neq("status", "cancelled"),
+      supabase
+        .from("store_settings")
+        .select("lat, delivery_base_fee, delivery_base_km, delivery_per_km")
+        .eq("id", 1)
+        .maybeSingle(),
     ]);
     if (catalogRes.error) throw catalogRes.error;
     if (ordersRes.error) throw ordersRes.error;
     const products = (catalogRes.data ?? []) as Product[];
     const orders = (ordersRes.data ?? []) as Order[];
     const welcomeEligible = !placedRes.error && (placedRes.count ?? 0) === 0;
+    // Before the distance_delivery_fee migration these columns don't exist: describe the flat fee.
+    const feeRow = feeRes.error ? null : (feeRes.data as FeeRow);
 
     // ---- ask Gemini
     const contents: { role: "user" | "model"; parts: { text: string }[] }[] = [];
@@ -273,7 +305,7 @@ Deno.serve(async (req) => {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": geminiKey },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt(products, orders, welcomeEligible) }] },
+          systemInstruction: { parts: [{ text: systemPrompt(products, orders, welcomeEligible, feeRow) }] },
           contents,
           generationConfig: {
             temperature: 0.4,

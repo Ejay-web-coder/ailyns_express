@@ -1351,6 +1351,144 @@ a.button {
 .delivery-items .order-lines {
   margin-top: 12px;
 }
+
+/* ------------------------------------------------------------ delivery fee */
+.fee-box {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: white;
+}
+.fee-box-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.fee-box-head > div {
+  display: flex;
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.fee-box-head small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+.fee-box-head strong {
+  color: var(--green);
+  font-size: 18px;
+}
+.fee-box-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.fee-box-head .fee-note {
+  color: #8a5404;
+}
+.fee-box-head .button {
+  min-height: 38px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+.fee-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.fee-form .field-grid {
+  gap: 10px 14px;
+}
+.fee-form .field-grid label {
+  margin-bottom: 0;
+}
+.fee-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.fee-chips button {
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.fee-chips button.active {
+  border-color: var(--pink);
+  background: var(--blush);
+  color: var(--pink-dark);
+}
+.fee-help {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.fee-help b {
+  color: var(--ink);
+}
+.fee-actions {
+  display: flex;
+  gap: 10px;
+}
+.fee-actions .button {
+  flex: 1;
+  min-height: 42px;
+}
+.order-totals .fee-adjusted {
+  margin: -2px 0 0;
+  color: #8a5404;
+  font-size: 11px;
+}
+.order-summary .fee-detail {
+  margin: -6px 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.form-note {
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: #fff4e3;
+  color: #8a5404;
+  font-size: 12px;
+  font-weight: 600;
+}
+.fee-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 10px;
+}
+.fee-examples span {
+  padding: 6px 10px;
+  border-radius: 9px;
+  background: #f6eff1;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.fee-examples b {
+  margin-left: 4px;
+  color: var(--ink);
+}
+.store-location-panel > small {
+  display: block;
+  font-size: 11px;
+}
 .history-list {
   display: grid;
   gap: 8px;

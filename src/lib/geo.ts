@@ -100,6 +100,10 @@ function makeQueue(gapMs: number) {
 const geocodeQueue = makeQueue(1100);
 const routeQueue = makeQueue(400);
 
+/** Give up on a slow free service instead of leaving checkout waiting on it. */
+const timeout = (ms: number) =>
+  typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined;
+
 const readCache = <T,>(key: string): T | undefined => {
   try {
     const raw = localStorage.getItem(key);
@@ -124,7 +128,7 @@ const geocodeMemory = new Map<string, Promise<Geocoded | null>>();
 
 async function nominatim(q: string): Promise<LatLng | null> {
   const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=ph&q=${encodeURIComponent(q)}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await fetch(url, { headers: { Accept: "application/json" }, signal: timeout(10000) });
   if (!res.ok) throw new Error(`Geocoding failed (${res.status})`);
   const rows = (await res.json()) as { lat: string; lon: string }[];
   return rows[0] ? { lat: Number(rows[0].lat), lng: Number(rows[0].lon) } : null;
@@ -175,6 +179,26 @@ export function geocodeOrderAddress(order: Pick<Order, "address" | "city" | "pro
   return lookup;
 }
 
+/** A typed address looked up on the map. `point` is null while it's empty, searching, or not found. */
+export function useGeocodedAddress(addr: Pick<Order, "address" | "city" | "province"> | null): {
+  point: Geocoded | null;
+  searching: boolean;
+} {
+  const key = addr && addr.address.trim() && addr.city.trim() ? `${addr.address}|${addr.city}|${addr.province}` : "";
+  const [found, setFound] = useState<{ key: string; value: Geocoded | null } | null>(null);
+  useEffect(() => {
+    if (!key || !addr) return;
+    let live = true;
+    void geocodeOrderAddress(addr).then((value) => live && setFound({ key, value }));
+    return () => {
+      live = false;
+    };
+  }, [key]);
+  if (!key) return { point: null, searching: false };
+  const done = found?.key === key;
+  return { point: done ? found.value : null, searching: !done };
+}
+
 /** The order's drop-off: the customer's pin, else the looked-up address. */
 export function useDropOff(order: Order): {
   point: LatLng | null;
@@ -216,6 +240,7 @@ export function fetchRoute(from: LatLng, to: LatLng): Promise<Route | null> {
   const request = routeQueue(async () => {
     const res = await fetch(
       `https://router.project-osrm.org/route/v1/driving/${key}?overview=full&geometries=geojson`,
+      { signal: timeout(10000) },
     );
     if (!res.ok) throw new Error(`Routing failed (${res.status})`);
     const body = (await res.json()) as {

@@ -1,7 +1,16 @@
 import { useEffect, useRef } from "react";
 import type { Product } from "../shared";
 import { supabase } from "./supabase";
-import type { ChatLog, ChatSuggestion, Order, OrderStatus, Profile, Role, StoreSettings } from "./types";
+import type {
+  ChatLog,
+  ChatSuggestion,
+  FeeSettings,
+  Order,
+  OrderStatus,
+  Profile,
+  Role,
+  StoreSettings,
+} from "./types";
 
 const ORDER_SELECT = "*, order_items(*), order_events(*)";
 
@@ -159,23 +168,53 @@ export type CheckoutDetails = {
   payment: "cod" | "gcash";
 };
 
+/** Where the order goes: the customer's pin, or their typed address looked up on the map. */
+export type DropOff = {
+  lat: number;
+  lng: number;
+  /** The customer dropped this pin (saved as the order's exact drop-off), vs. a looked-up address. */
+  pinned: boolean;
+  /** Road distance routed from the store, which the database checks before pricing on it. */
+  roadKm: number | null;
+};
+
+/** Place the order. The database works out the delivery fee from the drop-off's distance to the store. */
 export async function placeOrder(
   items: { product_id: number; quantity: number }[],
   details: CheckoutDetails,
+  dropOff: DropOff | null,
 ): Promise<Order> {
-  return unwrap(
-    await supabase.rpc("place_order", {
-      p_items: items,
-      p_name: details.name,
-      p_phone: details.phone,
-      p_email: details.email,
-      p_address: details.address,
-      p_city: details.city,
-      p_province: details.province,
-      p_notes: details.notes,
-      p_payment: details.payment,
-    }),
-  ) as Order;
+  const base = {
+    p_items: items,
+    p_name: details.name,
+    p_phone: details.phone,
+    p_email: details.email,
+    p_address: details.address,
+    p_city: details.city,
+    p_province: details.province,
+    p_notes: details.notes,
+    p_payment: details.payment,
+  };
+  const result = await supabase.rpc("place_order", {
+    ...base,
+    p_lat: dropOff?.lat ?? null,
+    p_lng: dropOff?.lng ?? null,
+    p_pinned: dropOff?.pinned ?? false,
+    p_road_km: dropOff?.roadKm != null ? Math.round(dropOff.roadKm * 1000) / 1000 : null,
+  });
+  if (!result.error) return result.data as Order;
+  // PGRST202 = no function with these arguments: the distance_delivery_fee migration isn't applied
+  // yet. Use the older flat-fee function, then save the pin separately as before.
+  if ((result.error as { code?: string }).code !== "PGRST202") throw result.error;
+  let order = unwrap(await supabase.rpc("place_order", base)) as Order;
+  if (dropOff?.pinned) {
+    const saved = await setOrderDropOff(order.id, dropOff.lat, dropOff.lng).then(
+      () => true,
+      () => false,
+    );
+    if (saved) order = { ...order, dest_lat: dropOff.lat, dest_lng: dropOff.lng };
+  }
+  return order;
 }
 
 /** Orders visible to the current user (RLS decides which: own, assigned, open jobs, or all for admin). */
@@ -234,6 +273,12 @@ export const riderUpdateLocation = (orderId: string, lat: number, lng: number) =
 /** The customer's exact drop-off pin for their own order. */
 export const setOrderDropOff = (orderId: string, lat: number, lng: number) =>
   rpc("customer_set_drop_off", { p_order: orderId, p_lat: lat, p_lng: lng });
+/**
+ * Change an open order's delivery fee: the assigned rider (up to the checkout fee + the store's
+ * rider allowance) or an admin. The reason is shown to the customer on the order timeline.
+ */
+export const setDeliveryFee = (orderId: string, fee: number, reason: string) =>
+  rpc("set_delivery_fee", { p_order: orderId, p_fee: fee, p_reason: reason });
 
 // ------------------------------------------------------------- store location
 
@@ -243,7 +288,9 @@ export async function fetchStoreSettings(): Promise<StoreSettings | null> {
   return error ? null : (data as StoreSettings | null);
 }
 
-export async function updateStoreSettings(changes: Pick<StoreSettings, "address" | "lat" | "lng">) {
+export async function updateStoreSettings(
+  changes: Pick<StoreSettings, "address" | "lat" | "lng"> | FeeSettings,
+) {
   // .select() so an update that RLS silently skipped shows up as an error instead of a fake success.
   return unwrap(
     await supabase.from("store_settings").update(changes).eq("id", 1).select().single(),

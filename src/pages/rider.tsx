@@ -22,6 +22,8 @@ import {
   statusLabel,
 } from "../lib/types";
 import { OrderDetailsModal, OrderItemsList, OrderMap } from "../components/OrderDetails";
+import { DeliveryFeeEditor } from "../components/DeliveryFee";
+import { formatKm } from "../lib/fees";
 
 type Tab = "jobs" | "active" | "history" | "profile";
 const LOCATION_INTERVAL_MS = 10_000;
@@ -314,7 +316,10 @@ export function RiderApp({
                               ? `Collect ${money(Number(order.total))}`
                               : `GCash · ${money(Number(order.total))}`}
                           </span>
-                          <span className="fee">Fee {money(Number(order.delivery_fee))}</span>
+                          <span className="fee">
+                            Fee {money(Number(order.delivery_fee))}
+                            {order.delivery_km != null ? ` · ${formatKm(Number(order.delivery_km))}` : ""}
+                          </span>
                         </div>
                         <div className="job-actions">
                           <button className="button button-outline" onClick={() => setDetails(order)}>
@@ -355,6 +360,8 @@ export function RiderApp({
                 onToggleSharing={toggleSharing}
                 onDetails={setDetails}
                 goToJobs={() => setTab("jobs")}
+                notify={notify}
+                reload={() => void load()}
               />
             )}
 
@@ -394,6 +401,8 @@ function ActiveDeliveries({
   onToggleSharing,
   onDetails,
   goToJobs,
+  notify,
+  reload,
 }: {
   orders: Order[];
   busyId: string | null;
@@ -404,6 +413,8 @@ function ActiveDeliveries({
   onToggleSharing: () => void;
   onDetails: (o: Order) => void;
   goToJobs: () => void;
+  notify: Notify;
+  reload: () => void;
 }) {
   if (!orders.length) {
     return (
@@ -490,6 +501,7 @@ function ActiveDeliveries({
                   </summary>
                   <OrderItemsList order={order} />
                 </details>
+                <DeliveryFeeEditor order={order} viewer="rider" notify={notify} onSaved={reload} />
                 {beforePickup && order.status !== "ready" && (
                   <p className="rider-hint small">
                     <Icon name="clock" size={16} /> The store is still{" "}
