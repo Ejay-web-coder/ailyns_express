@@ -35,6 +35,7 @@ npm run dev                  # http://localhost:4173
    - `…_ailyns_express_core.sql`: roles, products, orders, order items and events, RLS, RPCs, realtime
    - `…_seed_products.sql`: starter catalog
    - `…_address_chatbot_live_catalog.sql`: saved address on the profile, live product updates, chatbot suggested questions + question log
+   - `…_chat_logs_read_own.sql`: customers can read their own chat questions (used by the AI chat's per-customer limit)
 2. **Auth → URL configuration:** set **Site URL** to the production URL (e.g. `https://ailyns-express.vercel.app`) and add it plus `http://localhost:4173` to **Redirect URLs**. Password-reset and email-confirmation links fall back to the Site URL when the redirect isn't on this list, so a leftover `http://localhost:3000` breaks them.
 3. **Auth → Providers → Google:** create an OAuth client in Google Cloud Console (APIs & Services → Credentials → OAuth client ID → *Web application*). Add `https://<project-ref>.supabase.co/auth/v1/callback` as an authorized redirect URI, then paste the client ID and secret into Supabase.
 4. **Auth → Providers → Facebook:** create an app at developers.facebook.com, add *Facebook Login*, set the valid OAuth redirect URI to the same `…/auth/v1/callback`, then paste the App ID and secret into Supabase. While the Meta app is in **Development** mode only people listed under *App roles* can sign in; everyone else sees "App not active". Switch it to **Live** (it needs the Privacy Policy URL `/privacy`, the Data Deletion URL `/data-deletion` and an app icon).
@@ -66,7 +67,15 @@ All writes to orders go through `SECURITY DEFINER` functions (`place_order`, `ad
 
 ## Chatbot ("Ask Ailyn AI")
 
-The customer assistant answers from the live catalog (availability, price, ingredients, recommendations) and covers common questions: order tracking, delivery fee, payment, delivery time, cancelling and the first-order discount. Every question is saved to `chat_logs`, and only admins can read that table. **Admin → Chatbot** shows question counts, the share of questions the bot understood, top questions and the ones it couldn't answer. Admins also edit the suggested quick-reply questions (`chat_suggestions`) there: add, reorder, hide or delete.
+The customer assistant is powered by **Google Gemini** through the Supabase Edge Function `supabase/functions/ailyn-chat`. For each question the function loads the live catalog (availability, price, ingredients) and the customer's own last 5 orders, then asks Gemini for a short answer, up to 3 product cards and whether to show "Track my order". It answers in the customer's language, including Filipino and Taglish.
+
+- **Setup:** create a key at [Google AI Studio](https://aistudio.google.com/apikey), then in Supabase go to **Edge Functions → Secrets** and add `GEMINI_API_KEY`. The key lives only on the server and is never in the website code. Optional: `GEMINI_MODEL` picks a different model (default `gemini-3.5-flash-lite`).
+- **Deploy:** `supabase functions deploy ailyn-chat --no-verify-jwt` (the function checks the signed-in user itself).
+- **Privacy:** Gemini gets the question, the catalog and order codes, status, totals and items. It never gets the customer's name, phone number or address.
+- **Limits:** 8 questions per minute and 80 per day per customer. This needs the `…_chat_logs_read_own.sql` migration.
+- **Fallback:** with no key configured, over the limit or during a Gemini outage, the chat answers from built-in keyword rules (delivery fee, payment, tracking, product lookup), so it never stops working.
+
+Every question is saved to `chat_logs`. Customers can read only their own rows; admins can read all. **Admin → Chatbot** shows question counts, the share of questions the bot understood, top questions and the ones it couldn't answer. Admins also edit the suggested quick-reply questions (`chat_suggestions`) there: add, reorder, hide or delete.
 
 ## Installable app (PWA) and screen sizes
 

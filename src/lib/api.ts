@@ -297,6 +297,36 @@ export function logChat(entry: {
     });
 }
 
+export type AiChatTurn = { role: "user" | "assistant"; text: string };
+export type AiChatReply = {
+  answer: string;
+  /** Catalog product ids the answer is about, most relevant first (already checked server-side). */
+  product_ids: number[];
+  show_order_tracking: boolean;
+  understood: boolean;
+};
+
+/**
+ * Ask Ailyn AI (Google Gemini via the `ailyn-chat` Edge Function). The function logs the question
+ * itself. Throws when the AI can't answer (no key configured, rate limit, outage), so the caller
+ * can fall back to the built-in answers.
+ */
+export async function askAilynAI(question: string, history: AiChatTurn[]): Promise<AiChatReply> {
+  const { data, error } = await supabase.functions.invoke<AiChatReply>("ailyn-chat", {
+    body: { question, history },
+  });
+  if (error) throw error;
+  if (!data || typeof data.answer !== "string" || !data.answer.trim()) {
+    throw new Error("Ailyn AI returned no answer");
+  }
+  return {
+    answer: data.answer,
+    product_ids: Array.isArray(data.product_ids) ? data.product_ids : [],
+    show_order_tracking: data.show_order_tracking === true,
+    understood: data.understood !== false,
+  };
+}
+
 export async function fetchChatLogs(sinceDays = 30): Promise<ChatLog[]> {
   const since = new Date(Date.now() - sinceDays * 86_400_000).toISOString();
   return unwrap(

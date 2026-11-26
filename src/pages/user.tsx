@@ -22,6 +22,8 @@ import {
   fetchProducts,
   fetchProfile,
   logChat,
+  askAilynAI,
+  type AiChatTurn,
   placeOrder,
   signOut,
   updateMyProfile,
@@ -1714,7 +1716,8 @@ export function InfoModal({
 type ChatMessage = {
   from: "bot" | "user";
   text: string;
-  product?: Product;
+  /** Up to three product cards under the answer. */
+  products?: Product[];
   action?: "track";
   /** The bot understood the question (false = generic fallback). Used for admin stats. */
   matched?: boolean;
@@ -1746,6 +1749,7 @@ export function Chatbot({
     },
   ]);
   const [input, setInput] = useState("");
+  const [thinking, setThinking] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -1758,7 +1762,7 @@ export function Chatbot({
   }, []);
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages]);
+  }, [messages, thinking]);
 
   const answer = (question: string): ChatMessage => {
     const q = question.toLowerCase();
@@ -1819,7 +1823,7 @@ export function Chatbot({
     if (match && has("ingredient", "what's in", "whats in", "what is in", "contain", "made of", "allerg")) {
       return bot(
         match.ingredients ? `${match.name} contains: ${match.ingredients}` : `${match.name}: ${match.description}`,
-        { product: match },
+        { products: [match] },
       );
     }
 
@@ -1831,7 +1835,7 @@ export function Chatbot({
       const pick = [...(typed.length ? typed : pool)].sort((a, b) => b.rating - a.rating)[0];
       if (pick) {
         return bot(`I recommend ${pick.name} (★ ${pick.rating}, ${money(pick.price)}). ${pick.description}`, {
-          product: pick,
+          products: [pick],
         });
       }
     }
@@ -1841,7 +1845,7 @@ export function Chatbot({
         match.stock > 0
           ? `Yes! ${match.name} is available for ${money(match.price)} (${match.stock} in stock).`
           : `${match.name} is sold out right now. Check back soon!`,
-        { product: match },
+        { products: [match] },
       );
     }
 
@@ -1854,24 +1858,48 @@ export function Chatbot({
       ? {
           from: "bot",
           text: `I couldn't find that in our catalog. A customer favorite right now is ${favorite.name}, rated ${favorite.rating}.`,
-          product: favorite,
+          products: [favorite],
           matched: false,
         }
       : { from: "bot", text: "I couldn't find that in our catalog right now.", matched: false };
   };
 
-  const send = (question?: string) => {
+  const send = async (question?: string) => {
     const value = (question ?? input).trim();
-    if (!value) return;
-    const reply = answer(value);
-    setMessages((current) => [...current, { from: "user", text: value }, reply]);
+    if (!value || thinking) return;
+    // The conversation so far (minus the greeting), so follow-ups like "how much is it?" make sense.
+    const history: AiChatTurn[] = messages
+      .slice(1)
+      .slice(-8)
+      .map((m) => ({ role: m.from === "user" ? "user" : "assistant", text: m.text }));
+    setMessages((current) => [...current, { from: "user", text: value }]);
     setInput("");
-    logChat({
-      question: value,
-      answer: reply.text,
-      product_id: reply.product?.id ?? null,
-      matched: reply.matched ?? false,
-    });
+    setThinking(true);
+
+    let reply: ChatMessage;
+    try {
+      const ai = await askAilynAI(value, history);
+      const byId = new Map(products.map((p) => [p.id, p]));
+      reply = {
+        from: "bot",
+        text: ai.answer,
+        products: ai.product_ids.map((id) => byId.get(id)).filter((p): p is Product => !!p),
+        action: ai.show_order_tracking ? "track" : undefined,
+        matched: ai.understood,
+      };
+      // The Edge Function already saved this question to chat_logs.
+    } catch {
+      // No Gemini key yet, rate limited or offline: answer from the built-in rules instead.
+      reply = answer(value);
+      logChat({
+        question: value,
+        answer: reply.text,
+        product_id: reply.products?.[0]?.id ?? null,
+        matched: reply.matched ?? false,
+      });
+    }
+    setMessages((current) => [...current, reply]);
+    setThinking(false);
   };
 
   return (
@@ -1884,7 +1912,7 @@ export function Chatbot({
           <div>
             <strong>Ailyn AI</strong>
             <small>
-              <i /> Online · Shopping assistant
+              <i /> Online · AI shopping assistant
             </small>
           </div>
           <button onClick={onClose} aria-label="Close chat">
@@ -1895,17 +1923,17 @@ export function Chatbot({
           {messages.map((message, i) => (
             <div key={i}>
               <div className={`message ${message.from}`}>{message.text}</div>
-              {message.product && (
-                <button className="chat-product" onClick={() => openProduct(message.product!)}>
-                  <img src={message.product.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
+              {message.products?.map((product) => (
+                <button key={product.id} className="chat-product" onClick={() => openProduct(product)}>
+                  <img src={product.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
                   <div>
-                    <small>RECOMMENDED</small>
-                    <strong>{message.product.name}</strong>
-                    <span>{money(message.product.price)}</span>
+                    <small>{product.stock > 0 ? "RECOMMENDED" : "SOLD OUT"}</small>
+                    <strong>{product.name}</strong>
+                    <span>{money(product.price)}</span>
                   </div>
                   <Icon name="arrow" />
                 </button>
-              )}
+              ))}
               {message.action === "track" && (
                 <button className="button button-soft chat-action" onClick={onTrack}>
                   <Icon name="map" size={17} /> {hasActiveOrder ? "Track my order" : "View my orders"}
@@ -1913,6 +1941,13 @@ export function Chatbot({
               )}
             </div>
           ))}
+          {thinking && (
+            <div className="message bot typing" role="status" aria-label="Ailyn AI is typing">
+              <span />
+              <span />
+              <span />
+            </div>
+          )}
           <div ref={endRef} />
         </div>
         {suggestions.length > 0 && (
@@ -1920,7 +1955,7 @@ export function Chatbot({
             <span>Try asking</span>
             <div>
               {suggestions.map((q) => (
-                <button key={q} onClick={() => send(q)}>
+                <button key={q} disabled={thinking} onClick={() => void send(q)}>
                   {q}
                 </button>
               ))}
@@ -1933,9 +1968,11 @@ export function Chatbot({
             value={input}
             maxLength={500}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
+            onKeyDown={(e) => e.key === "Enter" && void send()}
           />
-          <button onClick={() => send()}>Send</button>
+          <button onClick={() => void send()} disabled={thinking || !input.trim()}>
+            Send
+          </button>
         </div>
       </aside>
     </div>
