@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Product } from "../shared";
 import { supabase } from "./supabase";
-import type { Order, OrderStatus, Profile, Role } from "./types";
+import type { ChatLog, ChatSuggestion, Order, OrderStatus, Profile, Role } from "./types";
 
 const ORDER_SELECT = "*, order_items(*), order_events(*)";
 
@@ -98,7 +98,12 @@ export async function fetchMyProfile(userId: string): Promise<Profile | null> {
 
 export async function updateMyProfile(
   id: string,
-  changes: Partial<Pick<Profile, "full_name" | "phone" | "vehicle" | "plate_number" | "rider_online">>,
+  changes: Partial<
+    Pick<
+      Profile,
+      "full_name" | "phone" | "vehicle" | "plate_number" | "rider_online" | "address" | "city" | "province"
+    >
+  >,
 ) {
   unwrap(await supabase.from("profiles").update(changes).eq("id", id));
 }
@@ -226,6 +231,83 @@ export const riderUpdateStatus = (orderId: string, status: OrderStatus) =>
   rpc("rider_update_status", { p_order: orderId, p_status: status });
 export const riderUpdateLocation = (orderId: string, lat: number, lng: number) =>
   rpc("rider_update_location", { p_order: orderId, p_lat: lat, p_lng: lng });
+
+// ------------------------------------------------------------- chatbot
+
+const DEFAULT_SUGGESTIONS = [
+  "What's in Chicken Adobo?",
+  "Recommend a meal",
+  "Do you have cooking oil?",
+  "How much is delivery?",
+];
+
+/** Suggested questions for the customer chatbot (admins also see hidden ones). */
+export async function fetchChatSuggestions(): Promise<ChatSuggestion[]> {
+  return unwrap(
+    await supabase
+      .from("chat_suggestions")
+      .select("*")
+      .order("sort_order")
+      .order("id"),
+  ) as ChatSuggestion[];
+}
+
+/** Active suggestion texts, falling back to built-in ones if the table is empty or unreachable. */
+export async function fetchActiveSuggestionTexts(): Promise<string[]> {
+  try {
+    const rows = (await fetchChatSuggestions()).filter((s) => s.active).map((s) => s.question);
+    return rows.length ? rows : DEFAULT_SUGGESTIONS;
+  } catch {
+    return DEFAULT_SUGGESTIONS;
+  }
+}
+
+export async function addChatSuggestion(question: string, sortOrder: number) {
+  unwrap(await supabase.from("chat_suggestions").insert({ question, sort_order: sortOrder }));
+}
+
+export async function updateChatSuggestion(
+  id: number,
+  changes: Partial<Pick<ChatSuggestion, "question" | "active" | "sort_order">>,
+) {
+  unwrap(await supabase.from("chat_suggestions").update(changes).eq("id", id));
+}
+
+export async function deleteChatSuggestion(id: number) {
+  unwrap(await supabase.from("chat_suggestions").delete().eq("id", id));
+}
+
+/** Record a customer question and the bot's answer. Never blocks or breaks the chat. */
+export function logChat(entry: {
+  question: string;
+  answer: string;
+  product_id: number | null;
+  matched: boolean;
+}) {
+  void supabase
+    .from("chat_logs")
+    .insert({
+      question: entry.question.slice(0, 500),
+      answer: entry.answer.slice(0, 2000),
+      product_id: entry.product_id,
+      matched: entry.matched,
+    })
+    .then(({ error }) => {
+      if (error) console.warn("Chat log not saved:", error.message);
+    });
+}
+
+export async function fetchChatLogs(sinceDays = 30): Promise<ChatLog[]> {
+  const since = new Date(Date.now() - sinceDays * 86_400_000).toISOString();
+  return unwrap(
+    await supabase
+      .from("chat_logs")
+      .select("*")
+      .gte("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(1000),
+  ) as ChatLog[];
+}
 
 // ------------------------------------------------------------- realtime
 

@@ -7,6 +7,13 @@ import {
   signUp,
 } from "../lib/api";
 import { errorMessage, supabase } from "../lib/supabase";
+import {
+  installPlatform,
+  launchedAsApp,
+  promptInstall,
+  useInstallPrompt,
+  type InstallPlatform,
+} from "../lib/pwa";
 import type { Role } from "../lib/types";
 
 const portals: {
@@ -54,7 +61,15 @@ const flow = [
   ["location", "Customer tracks", "Every update lands on the customer's timeline instantly."],
 ];
 
+const scrollToInstall = () =>
+  document.getElementById("install")?.scrollIntoView({ behavior: "smooth", block: "start" });
+
 export function Landing({ onChoose }: { onChoose: (role: Role) => void }) {
+  const { canPrompt, installed } = useInstallPrompt();
+  // One-tap install where the browser supports it; otherwise jump to the step-by-step guide.
+  const install = async () => {
+    if ((await promptInstall()) === "unavailable") scrollToInstall();
+  };
   return (
     <main className="landing">
       <header className="landing-nav content-width">
@@ -62,6 +77,17 @@ export function Landing({ onChoose }: { onChoose: (role: Role) => void }) {
         <nav>
           <a href="#portals">Portals</a>
           <a href="#how">How it works</a>
+          {!installed && (
+            <button
+              className="button button-soft nav-install"
+              onClick={() => void install()}
+              aria-label="Install app"
+              title="Install the Ailyn's Express app"
+            >
+              <Icon name="download" size={18} />
+              <span>Install app</span>
+            </button>
+          )}
           <button className="button button-primary" onClick={() => onChoose("customer")}>
             Order now
           </button>
@@ -167,6 +193,10 @@ export function Landing({ onChoose }: { onChoose: (role: Role) => void }) {
         </ol>
       </section>
 
+      {!launchedAsApp && (
+        <InstallSection canPrompt={canPrompt} installed={installed} onInstall={() => void install()} />
+      )}
+
       <footer className="landing-footer content-width">
         <Logo compact />
         <span>© {new Date().getFullYear()} Ailyn's Express · Your everyday food and grocery partner</span>
@@ -176,6 +206,212 @@ export function Landing({ onChoose }: { onChoose: (role: Role) => void }) {
         </nav>
       </footer>
     </main>
+  );
+}
+
+const installGuides: Record<InstallPlatform, { label: string; steps: React.ReactNode[]; note: string }> = {
+  ios: {
+    label: "iPhone & iPad",
+    steps: [
+      <>
+        Open this page in <b>Safari</b>.
+      </>,
+      <>
+        Tap the{" "}
+        <span className="install-key">
+          <Icon name="share" size={14} /> Share
+        </span>{" "}
+        button in the toolbar.
+      </>,
+      <>
+        Scroll down, tap{" "}
+        <span className="install-key">
+          <Icon name="addbox" size={14} /> Add to Home Screen
+        </span>
+        , then tap <b>Add</b>.
+      </>,
+    ],
+    note: "On iOS 16.4 and later, Chrome and Edge also have Add to Home Screen in their Share menu.",
+  },
+  android: {
+    label: "Android",
+    steps: [
+      <>
+        Open this page in <b>Chrome</b>.
+      </>,
+      <>
+        Tap the{" "}
+        <span className="install-key">
+          <Icon name="dots" size={14} /> menu
+        </span>{" "}
+        at the top right.
+      </>,
+      <>
+        Tap <b>Install app</b> (or <b>Add to Home screen</b>), then confirm.
+      </>,
+    ],
+    note: "Samsung Internet: open the menu, then Add page to → Home screen.",
+  },
+  desktop: {
+    label: "Computer",
+    steps: [
+      <>
+        Open this page in <b>Chrome</b> or <b>Edge</b> on Windows, Mac or Chromebook.
+      </>,
+      <>
+        Click the{" "}
+        <span className="install-key">
+          <Icon name="download" size={14} /> install
+        </span>{" "}
+        icon at the right end of the address bar, or look for <b>Install</b> in the browser menu.
+      </>,
+      <>
+        Click <b>Install</b>. Ailyn's Express opens in its own window and gets a desktop shortcut.
+      </>,
+    ],
+    note: "Safari on Mac: File → Add to Dock. Firefox can't install web apps yet, so use Chrome or Edge.",
+  },
+};
+
+function InstallSection({
+  canPrompt,
+  installed,
+  onInstall,
+}: {
+  canPrompt: boolean;
+  installed: boolean;
+  onInstall: () => void;
+}) {
+  const [device, setDevice] = useState<InstallPlatform>(installPlatform);
+  const guide = installGuides[device];
+  return (
+    <section className="install-section content-width" id="install" aria-labelledby="install-title">
+      <div className="install-copy">
+        <p className="eyebrow">GET THE APP</p>
+        <h2 id="install-title">
+          Ailyn's Express, <em>right on your home screen.</em>
+        </h2>
+        <p>
+          Install it in a few seconds, with no app store and no big download. It opens full-screen like
+          any other app on your phone, tablet or computer.
+        </p>
+        <ul className="install-perks">
+          <li>
+            <span>
+              <Icon name="bolt" size={18} />
+            </span>
+            <div>
+              <strong>Opens in one tap</strong>
+              <small>From your home screen, dock or taskbar</small>
+            </div>
+          </li>
+          <li>
+            <span>
+              <Icon name="smartphone" size={18} />
+            </span>
+            <div>
+              <strong>Full-screen view</strong>
+              <small>No browser bars around your order</small>
+            </div>
+          </li>
+          <li>
+            <span>
+              <Icon name="shield" size={18} />
+            </span>
+            <div>
+              <strong>One app, three portals</strong>
+              <small>For customers, riders and admins</small>
+            </div>
+          </li>
+        </ul>
+
+        {installed ? (
+          <p className="install-done" role="status">
+            <Icon name="check" size={18} /> Installed! Open Ailyn's Express from your home screen or app list.
+          </p>
+        ) : (
+          <>
+            {canPrompt && (
+              <div className="install-cta">
+                <button className="button button-primary button-large" onClick={onInstall}>
+                  <Icon name="download" /> Install Ailyn's Express
+                </button>
+                <small>Free · takes a few seconds</small>
+              </div>
+            )}
+            <div className="install-guide">
+              <div className="role-switch" role="group" aria-label="Show install steps for">
+                {(Object.keys(installGuides) as InstallPlatform[]).map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={device === key}
+                    className={device === key ? "active" : ""}
+                    onClick={() => setDevice(key)}
+                  >
+                    {installGuides[key].label}
+                  </button>
+                ))}
+              </div>
+              <ol className="install-steps">
+                {guide.steps.map((step, i) => (
+                  <li key={i}>
+                    <span>{step}</span>
+                  </li>
+                ))}
+              </ol>
+              <p className="install-note">{guide.note}</p>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="install-visual" aria-hidden="true">
+        <div className="phone">
+          <div className="phone-screen">
+            <div className="phone-status">
+              <span>10:30</span>
+              <i />
+              <b />
+            </div>
+            <div className="phone-head">
+              <span className="logo-mark">AE</span>
+              <div>
+                <small>DELIVER TO</small>
+                <strong>Home</strong>
+              </div>
+            </div>
+            <img src="/assets/ailyns-hero.png" alt="" />
+            <div className="phone-card">
+              <span>
+                <Icon name="bike" size={15} />
+              </span>
+              <div>
+                <small>RIDER ON THE WAY</small>
+                <strong>Arriving in about 18 min</strong>
+              </div>
+            </div>
+            <div className="phone-grid">
+              <span />
+              <span />
+              <span />
+              <span />
+            </div>
+            <div className="phone-tabs">
+              <Icon name="home" size={17} />
+              <Icon name="food" size={17} />
+              <Icon name="bag" size={17} />
+              <Icon name="orders" size={17} />
+              <Icon name="cart" size={17} />
+            </div>
+          </div>
+        </div>
+        <div className="home-icon">
+          <img src="/icons/icon-192.png" alt="" />
+          <span>Ailyn's</span>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -220,11 +456,13 @@ const authCopy: Record<Role, { eyebrow: string; title: React.ReactNode; body: st
 export function RoleAuth({
   role,
   notice,
+  noticeIsError = false,
   onBack,
   onSwitchRole,
 }: {
   role: Role;
   notice?: string;
+  noticeIsError?: boolean;
   onBack: () => void;
   onSwitchRole: (role: Role) => void;
 }) {
@@ -232,11 +470,15 @@ export function RoleAuth({
   const [email, setEmail] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
-  const [info, setInfo] = useState(notice ?? "");
+  // A problem from the previous sign-in attempt (e.g. a failed Google / Facebook redirect).
+  const [banner, setBanner] = useState(noticeIsError ? (notice ?? "") : "");
+  const [info, setInfo] = useState(noticeIsError ? "" : (notice ?? ""));
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    if (notice) setInfo(notice);
-  }, [notice]);
+    if (!notice) return;
+    if (noticeIsError) setBanner(notice);
+    else setInfo(notice);
+  }, [notice, noticeIsError]);
   const canRegister = role !== "admin";
   const registering = canRegister && mode === "register";
   const copy = authCopy[role];
@@ -250,6 +492,7 @@ export function RoleAuth({
       return;
     }
     setError("");
+    setBanner("");
     setInfo("");
     setBusy(true);
     try {
@@ -276,6 +519,7 @@ export function RoleAuth({
 
   const oauth = async (provider: "google" | "facebook") => {
     setError("");
+    setBanner("");
     try {
       await signInWithProvider(provider, role);
     } catch (err) {
@@ -328,6 +572,7 @@ export function RoleAuth({
                 onClick={() => {
                   setMode("login");
                   setError("");
+                  setBanner("");
                   setInfo("");
                   onSwitchRole(r);
                 }}
@@ -357,6 +602,11 @@ export function RoleAuth({
                   ? "Sign in to see open delivery jobs."
                   : "Sign in to continue your next delivery."}
           </p>
+          {banner && (
+            <p className="form-error" role="alert">
+              {banner}
+            </p>
+          )}
           {info && <p className="form-info">{info}</p>}
           <form onSubmit={submit}>
             {registering && (

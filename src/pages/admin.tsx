@@ -1,31 +1,40 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FALLBACK_IMAGE,
   Icon,
   Logo,
+  Notify,
   Product,
   SearchBar,
   Spinner,
   Status,
   categories,
+  imgFallback,
   money,
 } from "../shared";
 import {
+  addChatSuggestion,
   adminAssignRider,
   adminSetRiderApproval,
   adminUpdateStatus,
+  deleteChatSuggestion,
   deleteProduct,
+  fetchChatLogs,
+  fetchChatSuggestions,
   fetchOrders,
   fetchProducts,
   fetchProfiles,
   saveProduct,
   setProductStock,
   signOut,
+  updateChatSuggestion,
   updateMyProfile,
   useRealtime,
 } from "../lib/api";
 import { errorMessage, supabase } from "../lib/supabase";
 import {
+  ChatLog,
+  ChatSuggestion,
   Order,
   OrderStatus,
   Profile,
@@ -37,8 +46,6 @@ import {
   statusLabel,
 } from "../lib/types";
 import { OrderDetailsModal } from "../components/OrderDetails";
-
-type Notify = (message: string) => void;
 
 const adminNav = [
   ["Dashboard", "dashboard"],
@@ -81,15 +88,15 @@ export function AdminApp({
   const [orderSearch, setOrderSearch] = useState("");
 
   const loadProducts = useCallback(
-    () => fetchProducts().then(setProducts).catch((e) => notify(errorMessage(e))),
+    () => fetchProducts().then(setProducts).catch((e) => notify(errorMessage(e), "error")),
     [notify],
   );
   const loadOrders = useCallback(
-    () => fetchOrders().then(setOrders).catch((e) => notify(errorMessage(e))),
+    () => fetchOrders().then(setOrders).catch((e) => notify(errorMessage(e), "error")),
     [notify],
   );
   const loadProfiles = useCallback(
-    () => fetchProfiles().then(setProfiles).catch((e) => notify(errorMessage(e))),
+    () => fetchProfiles().then(setProfiles).catch((e) => notify(errorMessage(e), "error")),
     [notify],
   );
 
@@ -97,10 +104,9 @@ export function AdminApp({
     Promise.all([loadProducts(), loadOrders(), loadProfiles()]).finally(() => setLoading(false));
   }, [loadProducts, loadOrders, loadProfiles]);
 
-  useRealtime("admin-orders", [{ table: "orders" }, { table: "order_events" }], () => {
-    void loadOrders();
-    void loadProducts(); // stock moves with orders
-  });
+  useRealtime("admin-orders", [{ table: "orders" }, { table: "order_events" }], () => void loadOrders());
+  // Stock moves with orders, and other admins may edit the catalog.
+  useRealtime("admin-products", [{ table: "products" }], () => void loadProducts());
   useRealtime("admin-profiles", [{ table: "profiles" }], () => void loadProfiles());
 
   const riders = profiles.filter((p) => p.role === "rider");
@@ -208,7 +214,7 @@ export function AdminApp({
           ) : section === "Sales & Reports" ? (
             <AdminReports orders={orders} products={products} customers={customers} riders={riders} notify={notify} />
           ) : section === "Chatbot" ? (
-            <AdminChatbot notify={notify} />
+            <AdminChatbot notify={notify} profileById={profileById} products={products} />
           ) : (
             <AdminSettings profile={profile} setProfile={setProfile} notify={notify} />
           )}
@@ -469,7 +475,7 @@ function AdminDashboard({
             best.map((p, i) => (
               <div className="best-item" key={p.name}>
                 <b>{i + 1}</b>
-                <img src={p.image || FALLBACK_IMAGE} alt="" />
+                <img src={p.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
                 <div>
                   <strong>{p.name}</strong>
                   <small>{p.qty} sold</small>
@@ -512,7 +518,7 @@ function OrderTable({
       notify(message);
       reload?.();
     } catch (e) {
-      notify(errorMessage(e));
+      notify(errorMessage(e), "error");
     } finally {
       setBusy(null);
     }
@@ -784,7 +790,7 @@ function AdminRiders({
       notify(approved ? `${rider.full_name} approved` : `${rider.full_name} suspended`);
       reload();
     } catch (e) {
-      notify(errorMessage(e));
+      notify(errorMessage(e), "error");
     } finally {
       setBusy(null);
     }
@@ -972,7 +978,7 @@ function AdminProducts({
       setEditing(null);
       notify("id" in editing ? "Product updated" : "Product added");
     } catch (err) {
-      notify(errorMessage(err));
+      notify(errorMessage(err), "error");
     } finally {
       setBusy(false);
     }
@@ -985,7 +991,7 @@ function AdminProducts({
       await reload();
       notify("Product deleted");
     } catch (err) {
-      notify(errorMessage(err));
+      notify(errorMessage(err), "error");
     }
   };
 
@@ -1032,7 +1038,7 @@ function AdminProducts({
               <tr key={p.id}>
                 <td>
                   <div className="table-product">
-                    <img src={p.image || FALLBACK_IMAGE} alt="" />
+                    <img src={p.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
                     <div>
                       <strong>{p.name}</strong>
                       <small>#PRD-{String(p.id).padStart(4, "0")}</small>
@@ -1249,7 +1255,7 @@ function AdminInventory({
       setDrafts(({ [p.id]: _, ...rest }) => rest);
       notify(`${p.name} stock set to ${value}`);
     } catch (e) {
-      notify(errorMessage(e));
+      notify(errorMessage(e), "error");
     }
   };
 
@@ -1290,7 +1296,7 @@ function AdminInventory({
               <tr key={p.id}>
                 <td>
                   <div className="table-product">
-                    <img src={p.image || FALLBACK_IMAGE} alt="" />
+                    <img src={p.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
                     <strong>{p.name}</strong>
                   </div>
                 </td>
@@ -1503,86 +1509,286 @@ function AdminReports({
   );
 }
 
-// ------------------------------------------------------------------ chatbot (sample content)
+// ------------------------------------------------------------------ chatbot
 
-function AdminChatbot({ notify }: { notify: Notify }) {
+const timeAgo = (iso: string) => {
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return formatDateTime(iso);
+};
+
+function AdminChatbot({
+  notify,
+  profileById,
+  products,
+}: {
+  notify: Notify;
+  profileById: Map<string, Profile>;
+  products: Product[];
+}) {
+  const [logs, setLogs] = useState<ChatLog[]>([]);
+  const [suggestions, setSuggestions] = useState<ChatSuggestion[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [nextLogs, nextSuggestions] = await Promise.all([fetchChatLogs(30), fetchChatSuggestions()]);
+      setLogs(nextLogs);
+      setSuggestions(nextSuggestions);
+    } catch (e) {
+      notify(errorMessage(e), "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [notify]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const productName = new Map(products.map((p) => [p.id, p.name]));
+  const customersUsing = new Set(logs.map((l) => l.customer_id)).size;
+  const recommendations = logs.filter((l) => l.product_id != null).length;
+  const answeredPct = logs.length ? Math.round((logs.filter((l) => l.matched).length / logs.length) * 100) : 0;
+  const top = [
+    ...logs
+      .reduce((map, l) => {
+        const key = l.question.trim().toLowerCase().replace(/[?!.\s]+$/, "");
+        const row = map.get(key) ?? { text: l.question.trim(), count: 0 };
+        row.count += 1;
+        map.set(key, row);
+        return map;
+      }, new Map<string, { text: string; count: number }>())
+      .values(),
+  ]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+  const unanswered = logs.filter((l) => !l.matched).slice(0, 6);
+
+  const guard = async (action: () => Promise<void>, message: string) => {
+    setBusy(true);
+    try {
+      await action();
+      await load();
+      notify(message);
+    } catch (e) {
+      notify(errorMessage(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const add = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const question = draft.trim();
+    if (question.length < 3 || question.length > 120) {
+      notify("A suggested question needs 3 to 120 characters", "error");
+      return;
+    }
+    const next = Math.max(0, ...suggestions.map((s) => s.sort_order)) + 1;
+    void guard(async () => {
+      await addChatSuggestion(question, next);
+      setDraft("");
+    }, "Suggested question added");
+  };
+
+  const move = (index: number, delta: -1 | 1) => {
+    const order = [...suggestions];
+    const [item] = order.splice(index, 1);
+    order.splice(index + delta, 0, item);
+    void guard(
+      () =>
+        Promise.all(
+          order.map((s, i) => (s.sort_order === i + 1 ? null : updateChatSuggestion(s.id, { sort_order: i + 1 }))),
+        ).then(() => undefined),
+      "Order updated",
+    );
+  };
+
   return (
     <>
       <div className="admin-page-head">
         <div>
           <h2>AI chatbot management</h2>
-          <p>The customer assistant answers from the live product catalog. Figures below are sample data.</p>
+          <p>
+            What customers ask the shopping assistant over the last 30 days, and the suggested questions it
+            shows them.
+          </p>
         </div>
-        <button
-          className="button button-primary"
-          onClick={() => notify("Suggested questions are configured in the customer chatbot.")}
-        >
-          <Icon name="plus" /> Add suggested question
-        </button>
+        <div className="report-actions">
+          <button className="button button-outline" onClick={() => void load()} disabled={loading}>
+            <Icon name="refresh" size={17} /> Refresh
+          </button>
+          <button className="button button-primary" onClick={() => inputRef.current?.focus()}>
+            <Icon name="plus" /> Add suggested question
+          </button>
+        </div>
       </div>
-      <div className="chatbot-stats">
-        {[
-          ["chat", "428", "Conversations this month"],
-          ["check", "91%", "Helpful response rate"],
-          ["food", "184", "Product recommendations"],
-        ].map(([icon, value, label]) => (
-          <div key={label}>
-            <span>
-              <Icon name={icon} />
-            </span>
-            <p>
-              <strong>{value}</strong>
-              <small>{label}</small>
-            </p>
-          </div>
-        ))}
-      </div>
-      <div className="admin-chat-grid">
-        <section className="panel">
-          <div className="panel-title">
-            <div>
-              <h3>Recent interactions</h3>
-              <p>Sample chatbot conversation data</p>
-            </div>
-          </div>
-          {[
-            ["Juan Dela Cruz", "What are the ingredients of Chicken Adobo?", "2 min ago"],
-            ["Maria Santos", "Do you have cooking oil?", "14 min ago"],
-            ["Guest user", "Recommend a healthy meal for lunch", "28 min ago"],
-            ["Paolo Reyes", "What milk brands are available?", "42 min ago"],
-          ].map(([name, q, t]) => (
-            <div className="interaction" key={q}>
-              <span>{name[0]}</span>
-              <div>
-                <strong>{name}</strong>
-                <p>{q}</p>
+      {loading ? (
+        <Spinner label="Loading chatbot activity" />
+      ) : (
+        <>
+          <div className="chatbot-stats">
+            {[
+              ["chat", String(logs.length), `Questions · ${customersUsing} customer${customersUsing === 1 ? "" : "s"}`],
+              ["check", logs.length ? `${answeredPct}%` : "—", "Questions the bot understood"],
+              ["food", String(recommendations), "Product recommendations"],
+            ].map(([icon, value, label]) => (
+              <div key={label}>
+                <span>
+                  <Icon name={icon} />
+                </span>
+                <p>
+                  <strong>{value}</strong>
+                  <small>{label}</small>
+                </p>
               </div>
-              <small>{t}</small>
-            </div>
-          ))}
-        </section>
-        <section className="panel">
-          <div className="panel-title">
-            <div>
-              <h3>Top questions</h3>
-              <p>Most asked this month</p>
-            </div>
+            ))}
           </div>
-          {[
-            "What meals do you recommend?",
-            "Do you have cooking oil?",
-            "What are the delivery fees?",
-            "What's in Chicken Adobo?",
-            "Where is my order?",
-          ].map((x, i) => (
-            <div className="faq-item" key={x}>
-              <b>{i + 1}</b>
-              <span>{x}</span>
-              <small>{[82, 65, 48, 42, 39][i]} asks</small>
-            </div>
-          ))}
-        </section>
-      </div>
+          <div className="admin-chat-grid">
+            <section className="panel">
+              <div className="panel-title">
+                <div>
+                  <h3>Recent interactions</h3>
+                  <p>Latest customer questions</p>
+                </div>
+              </div>
+              {logs.length === 0 ? (
+                <p className="muted small-note">
+                  No questions yet. They appear here as customers use “Ask Ailyn AI”.
+                </p>
+              ) : (
+                logs.slice(0, 6).map((l) => {
+                  const name = profileById.get(l.customer_id)?.full_name || "Customer";
+                  return (
+                    <div className="interaction" key={l.id}>
+                      <span>{initials(name)}</span>
+                      <div>
+                        <strong>{name}</strong>
+                        <p>{l.question}</p>
+                        {l.product_id != null && (
+                          <small className="muted">→ {productName.get(l.product_id) ?? "a product"}</small>
+                        )}
+                      </div>
+                      <small>{timeAgo(l.created_at)}</small>
+                    </div>
+                  );
+                })
+              )}
+            </section>
+            <section className="panel">
+              <div className="panel-title">
+                <div>
+                  <h3>Top questions</h3>
+                  <p>Most asked · last 30 days</p>
+                </div>
+              </div>
+              {top.length === 0 ? (
+                <p className="muted small-note">Nothing asked yet.</p>
+              ) : (
+                top.map((row, i) => (
+                  <div className="faq-item" key={row.text}>
+                    <b>{i + 1}</b>
+                    <span>{row.text}</span>
+                    <small>
+                      {row.count} ask{row.count === 1 ? "" : "s"}
+                    </small>
+                  </div>
+                ))
+              )}
+            </section>
+          </div>
+          <div className="admin-chat-grid">
+            <section className="panel">
+              <div className="panel-title">
+                <div>
+                  <h3>Suggested questions</h3>
+                  <p>Shown as quick replies in the customer chat</p>
+                </div>
+              </div>
+              <form className="suggestion-form" onSubmit={add}>
+                <input
+                  ref={inputRef}
+                  value={draft}
+                  maxLength={120}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="e.g. Is the bread baked today?"
+                  aria-label="New suggested question"
+                />
+                <button className="button button-primary" disabled={busy || !draft.trim()}>
+                  Add
+                </button>
+              </form>
+              {suggestions.length === 0 && (
+                <p className="muted small-note">No suggestions yet. Customers see the built-in defaults.</p>
+              )}
+              {suggestions.map((s, i) => (
+                <div className={`suggestion-row ${s.active ? "" : "hidden"}`} key={s.id}>
+                  <b className={`live-dot ${s.active ? "on" : ""}`} />
+                  <p>{s.question}</p>
+                  <div className="table-actions">
+                    <button disabled={busy || i === 0} onClick={() => move(i, -1)} aria-label="Move up">
+                      ↑
+                    </button>
+                    <button
+                      disabled={busy || i === suggestions.length - 1}
+                      onClick={() => move(i, 1)}
+                      aria-label="Move down"
+                    >
+                      ↓
+                    </button>
+                    <button
+                      disabled={busy}
+                      onClick={() =>
+                        void guard(
+                          () => updateChatSuggestion(s.id, { active: !s.active }),
+                          s.active ? "Hidden from customers" : "Shown to customers",
+                        )
+                      }
+                    >
+                      {s.active ? "Hide" : "Show"}
+                    </button>
+                    <button
+                      className="danger"
+                      disabled={busy}
+                      onClick={() =>
+                        window.confirm(`Delete “${s.question}”?`) &&
+                        void guard(() => deleteChatSuggestion(s.id), "Suggested question deleted")
+                      }
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </section>
+            <section className="panel">
+              <div className="panel-title">
+                <div>
+                  <h3>Couldn't answer</h3>
+                  <p>Ideas for new products or suggested questions</p>
+                </div>
+              </div>
+              {unanswered.length === 0 ? (
+                <p className="muted small-note">Every recent question got a direct answer.</p>
+              ) : (
+                unanswered.map((l) => (
+                  <div className="faq-item" key={l.id}>
+                    <b>?</b>
+                    <span>{l.question}</span>
+                    <small>{timeAgo(l.created_at)}</small>
+                  </div>
+                ))
+              )}
+            </section>
+          </div>
+        </>
+      )}
     </>
   );
 }
@@ -1601,25 +1807,30 @@ function AdminSettings({
   const [busy, setBusy] = useState(false);
   const save = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const data = new FormData(e.currentTarget);
+    // React clears e.currentTarget once the handler yields, so keep the form element.
+    const form = e.currentTarget;
+    const data = new FormData(form);
     const changes = {
       full_name: String(data.get("name") ?? "").trim(),
       phone: String(data.get("phone") ?? "").trim() || null,
     };
+    const password = String(data.get("password") ?? "");
+    if (password && password.length < 6) {
+      notify("New password must be at least 6 characters", "error");
+      return;
+    }
     setBusy(true);
     try {
       await updateMyProfile(profile.id, changes);
       setProfile({ ...profile, ...changes });
-      const password = String(data.get("password") ?? "");
       if (password) {
-        if (password.length < 6) throw new Error("New password must be at least 6 characters");
         const { error } = await supabase.auth.updateUser({ password });
         if (error) throw error;
-        (e.currentTarget.elements.namedItem("password") as HTMLInputElement).value = "";
+        (form.elements.namedItem("password") as HTMLInputElement).value = "";
       }
-      notify("Settings saved");
+      notify(password ? "Settings and password saved" : "Settings saved");
     } catch (err) {
-      notify(errorMessage(err));
+      notify(errorMessage(err), "error");
     } finally {
       setBusy(false);
     }

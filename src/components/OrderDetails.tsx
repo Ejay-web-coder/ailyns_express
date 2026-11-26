@@ -1,4 +1,4 @@
-import { Icon, Status, money } from "../shared";
+import { Icon, Status, imgFallback, money } from "../shared";
 import {
   Order,
   Profile,
@@ -75,7 +75,7 @@ export function OrderItemsList({ order }: { order: Order }) {
     <div className="order-lines">
       {(order.order_items ?? []).map((item) => (
         <div key={item.id} className="order-line">
-          {item.image ? <img src={item.image} alt="" /> : <span className="order-line-ph" />}
+          {item.image ? <img src={item.image} alt="" onError={imgFallback} /> : <span className="order-line-ph" />}
           <span>
             <strong>{item.name}</strong>
             <small>

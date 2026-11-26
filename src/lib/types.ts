@@ -20,6 +20,27 @@ export type Profile = {
   plate_number: string | null;
   rider_approved: boolean;
   rider_online: boolean;
+  address: string | null;
+  city: string | null;
+  province: string | null;
+  created_at: string;
+};
+
+export type ChatSuggestion = {
+  id: number;
+  question: string;
+  sort_order: number;
+  active: boolean;
+  created_at: string;
+};
+
+export type ChatLog = {
+  id: number;
+  customer_id: string;
+  question: string;
+  answer: string;
+  product_id: number | null;
+  matched: boolean;
   created_at: string;
 };
 

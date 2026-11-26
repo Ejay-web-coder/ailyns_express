@@ -1,23 +1,27 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   CartItem,
   FALLBACK_IMAGE,
   Icon,
   Logo,
+  Notify,
   Page,
   Product,
   SearchBar,
   Spinner,
   categories,
+  imgFallback,
   money,
 } from "../shared";
 import {
   CheckoutDetails,
   cancelOrder,
+  fetchActiveSuggestionTexts,
   fetchOrder,
   fetchOrders,
   fetchProducts,
   fetchProfile,
+  logChat,
   placeOrder,
   signOut,
   updateMyProfile,
@@ -39,6 +43,13 @@ import { OrderDetailsModal, OrderItemsList, OrderMap } from "../components/Order
 
 const DELIVERY_FEE = 49;
 const WELCOME_DISCOUNT = 30;
+
+const priceRanges = [
+  { id: "any", label: "Any price", min: 0, max: Infinity },
+  { id: "under100", label: "Under ₱100", min: 0, max: 100 },
+  { id: "100to200", label: "₱100 – ₱200", min: 100, max: 200 },
+  { id: "over200", label: "₱200 and up", min: 200, max: Infinity },
+] as const;
 
 type SavedAddress = { address: string; city: string; province: string };
 
@@ -67,7 +78,7 @@ export function CustomerApp({
 }: {
   profile: Profile;
   setProfile: (p: Profile) => void;
-  notify: (message: string) => void;
+  notify: Notify;
 }) {
   const cartKey = `ae_cart_${profile.id}`;
   const addressKey = `ae_address_${profile.id}`;
@@ -83,11 +94,14 @@ export function CustomerApp({
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
   const [dialog, setDialog] = useState<{ title: string; message: string } | null>(null);
+  // The saved address lives on the profile (all devices); localStorage is only a fallback.
   const [address, setAddress] = useState<SavedAddress>(() =>
-    readJson(addressKey, { address: "", city: "San Fernando", province: "Pampanga" }),
+    profile.address
+      ? { address: profile.address, city: profile.city ?? "", province: profile.province ?? "" }
+      : readJson(addressKey, { address: "", city: "San Fernando", province: "Pampanga" }),
   );
 
-  useEffect(() => {
+  const loadProducts = useCallback(() => {
     fetchProducts()
       .then((list) => {
         setProducts(list);
@@ -101,14 +115,17 @@ export function CustomerApp({
             .filter((item): item is CartItem => !!item && item.quantity > 0),
         );
       })
-      .catch((e) => notify(errorMessage(e)))
+      .catch((e) => notify(errorMessage(e), "error"))
       .finally(() => setProductsLoading(false));
   }, [notify]);
+  useEffect(loadProducts, [loadProducts]);
+  // Price, stock and visibility changes made by the store show up without a reload.
+  useRealtime("customer-catalog", [{ table: "products" }], loadProducts);
 
   const loadOrders = useCallback(() => {
     fetchOrders({ customerId: profile.id })
       .then(setOrders)
-      .catch((e) => notify(errorMessage(e)));
+      .catch((e) => notify(errorMessage(e), "error"));
   }, [profile.id, notify]);
   useEffect(loadOrders, [loadOrders]);
   useRealtime(
@@ -119,6 +136,21 @@ export function CustomerApp({
 
   useEffect(() => writeJson(cartKey, cart), [cart, cartKey]);
   useEffect(() => writeJson(addressKey, address), [address, addressKey]);
+
+  /** Save the delivery address locally right away and to the profile in the background. */
+  const persistAddress = useCallback(
+    async (next: SavedAddress) => {
+      setAddress(next);
+      const changes = {
+        address: next.address.trim() || null,
+        city: next.city.trim() || null,
+        province: next.province.trim() || null,
+      };
+      await updateMyProfile(profile.id, changes);
+      setProfile({ ...profile, ...changes });
+    },
+    [profile, setProfile],
+  );
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
@@ -135,7 +167,7 @@ export function CustomerApp({
   const addToCart = (product: Product, goToCart = false, amount = 1) => {
     const inCart = cart.find((item) => item.id === product.id)?.quantity ?? 0;
     if (inCart + amount > product.stock) {
-      notify(product.stock ? `Only ${product.stock} left of ${product.name}` : `${product.name} is sold out`);
+      notify(product.stock ? `Only ${product.stock} left of ${product.name}` : `${product.name} is sold out`, "error");
       return;
     }
     setCart((current) =>
@@ -170,6 +202,19 @@ export function CustomerApp({
   };
 
   const activeOrders = orders.filter((o) => activeStatuses.includes(o.status));
+  // Product details follow the live catalog (stock, price) instead of a stale snapshot.
+  const liveSelected = selected ? (products.find((p) => p.id === selected.id) ?? selected) : null;
+
+  /** Search from the home page: open whichever catalog actually has matches. */
+  const searchFromHome = () => {
+    const q = search.trim().toLowerCase();
+    const hits = (type: Product["type"]) =>
+      products.filter(
+        (p) => p.type === type && (p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q)),
+      ).length;
+    setActiveCategory("All");
+    navigate(q && hits("food") === 0 && hits("grocery") > 0 ? "grocery" : "food");
+  };
 
   return (
     <>
@@ -199,6 +244,7 @@ export function CustomerApp({
                 addToCart={addToCart}
                 search={search}
                 setSearch={setSearch}
+                onSearch={searchFromHome}
                 activeOrder={activeOrders[0]}
                 onTrack={track}
               />
@@ -213,14 +259,14 @@ export function CustomerApp({
                 setActiveCategory={setActiveCategory}
                 openProduct={openProduct}
                 addToCart={addToCart}
-                openDialog={openDialog}
               />
             )}
           </>
         )}
-        {page === "details" && selected && (
+        {page === "details" && liveSelected && (
           <ProductDetails
-            product={selected}
+            key={liveSelected.id}
+            product={liveSelected}
             addToCart={addToCart}
             navigate={navigate}
             city={address.city}
@@ -245,7 +291,9 @@ export function CustomerApp({
             address={address}
             navigate={navigate}
             onPlaced={(order, details) => {
-              setAddress({ address: details.address, city: details.city, province: details.province });
+              persistAddress({ address: details.address, city: details.city, province: details.province }).catch(
+                () => undefined, // the order went through; a failed address sync isn't worth an error
+              );
               setCart([]);
               setLastOrder(order);
               setTrackingId(order.id);
@@ -271,7 +319,7 @@ export function CustomerApp({
             setProfile={setProfile}
             orders={orders}
             address={address}
-            setAddress={setAddress}
+            saveAddress={persistAddress}
             navigate={navigate}
             notify={notify}
           />
@@ -280,6 +328,12 @@ export function CustomerApp({
       {chatOpen && (
         <Chatbot
           products={products}
+          hasActiveOrder={activeOrders.length > 0}
+          onTrack={() => {
+            setChatOpen(false);
+            if (activeOrders[0]) track(activeOrders[0].id);
+            else navigate("orders");
+          }}
           onClose={() => setChatOpen(false)}
           openProduct={(product) => {
             setChatOpen(false);
@@ -352,7 +406,7 @@ export function CustomerShell({
             <Icon name="bell" />
             {activeCount > 0 && <span>{activeCount}</span>}
           </button>
-          <button aria-label="Shopping cart" onClick={() => navigate("cart")}>
+          <button className="header-cart" aria-label="Shopping cart" onClick={() => navigate("cart")}>
             <Icon name="cart" />
             {cartCount > 0 && <span>{cartCount}</span>}
           </button>
@@ -398,6 +452,7 @@ export function Home({
   addToCart,
   search,
   setSearch,
+  onSearch,
   activeOrder,
   onTrack,
 }: {
@@ -407,6 +462,7 @@ export function Home({
   addToCart: (p: Product) => void;
   search: string;
   setSearch: (value: string) => void;
+  onSearch: () => void;
   activeOrder?: Order;
   onTrack: (id: string) => void;
 }) {
@@ -454,7 +510,7 @@ export function Home({
           placeholder="Search meals, groceries, stores..."
           value={search}
           onChange={setSearch}
-          onSearch={() => navigate("food")}
+          onSearch={onSearch}
         />
       </div>
       <section className="content-width section-block">
@@ -589,7 +645,7 @@ export function ProductCard({
   return (
     <article className={`product-card ${soldOut ? "sold-out" : ""}`}>
       <button className="product-image" onClick={() => openProduct(product)}>
-        <img src={product.image || FALLBACK_IMAGE} alt={product.name} />
+        <img src={product.image || FALLBACK_IMAGE} alt={product.name} onError={imgFallback} loading="lazy" />
         <span className="rating">★ {product.rating}</span>
         {soldOut && <span className="sold-out-tag">Sold out</span>}
       </button>
@@ -622,7 +678,6 @@ export function Catalog({
   setActiveCategory,
   openProduct,
   addToCart,
-  openDialog,
 }: {
   products: Product[];
   type: "food" | "grocery";
@@ -632,24 +687,35 @@ export function Catalog({
   setActiveCategory: (v: string) => void;
   openProduct: (p: Product) => void;
   addToCart: (p: Product) => void;
-  openDialog: (title: string, message: string) => void;
 }) {
   const [sortBy, setSortBy] = useState("Popular");
+  const [showFilters, setShowFilters] = useState(false);
+  const [inStockOnly, setInStockOnly] = useState(false);
+  const [price, setPrice] = useState<(typeof priceRanges)[number]["id"]>("any");
   const relevantCategories =
     type === "food" ? ["All", "Meals", "Snacks", "Beverages"] : ["All", ...categories.slice(3)];
   const category = relevantCategories.includes(activeCategory) ? activeCategory : "All";
+  const q = search.trim().toLowerCase();
+  const range = priceRanges.find((r) => r.id === price) ?? priceRanges[0];
   const filtered = products.filter(
     (p) =>
       p.type === type &&
       (category === "All" || p.category === category) &&
-      p.name.toLowerCase().includes(search.toLowerCase()),
+      (!q || p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q)) &&
+      (!inStockOnly || p.stock > 0) &&
+      p.price >= range.min &&
+      p.price < range.max,
   );
+  const activeFilters = (inStockOnly ? 1 : 0) + (price !== "any" ? 1 : 0);
   const sorted =
     sortBy === "Price: Low to high"
       ? [...filtered].sort((a, b) => a.price - b.price)
-      : sortBy === "Top rated"
-        ? [...filtered].sort((a, b) => b.rating - a.rating)
-        : filtered;
+      : sortBy === "Price: High to low"
+        ? [...filtered].sort((a, b) => b.price - a.price)
+        : sortBy === "Top rated"
+          ? [...filtered].sort((a, b) => b.rating - a.rating)
+          : // Popular: the store's own order, with sold-out items moved to the end.
+            [...filtered].sort((a, b) => Number(a.stock <= 0) - Number(b.stock <= 0));
   return (
     <div className="catalog-page content-width">
       <div className="catalog-heading">
@@ -680,22 +746,50 @@ export function Catalog({
         </div>
         <div className="toolbar-actions">
           <button
-            onClick={() =>
-              openDialog(
-                "Product filters",
-                "Choose a category above to narrow the products, or use the sort menu to order by price or rating.",
-              )
-            }
+            className={showFilters || activeFilters ? "active" : ""}
+            aria-expanded={showFilters}
+            onClick={() => setShowFilters(!showFilters)}
           >
             <Icon name="filter" size={17} /> Filters
+            {activeFilters > 0 && <b className="filter-count">{activeFilters}</b>}
           </button>
           <select aria-label="Sort products" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
             <option>Popular</option>
             <option>Price: Low to high</option>
+            <option>Price: High to low</option>
             <option>Top rated</option>
           </select>
         </div>
       </div>
+      {showFilters && (
+        <div className="filter-panel">
+          <div>
+            <strong>Price</strong>
+            <div className="filter-chips">
+              {priceRanges.map((r) => (
+                <button key={r.id} className={price === r.id ? "active" : ""} onClick={() => setPrice(r.id)}>
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <label className="check-label">
+            <input type="checkbox" checked={inStockOnly} onChange={(e) => setInStockOnly(e.target.checked)} />
+            In stock only
+          </label>
+          {activeFilters > 0 && (
+            <button
+              className="link"
+              onClick={() => {
+                setPrice("any");
+                setInStockOnly(false);
+              }}
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+      )}
       <div className="catalog-layout">
         <aside>
           <h3>Categories</h3>
@@ -727,7 +821,7 @@ export function Catalog({
             <div className="empty-state">
               <Icon name="search" size={32} />
               <h3>No products found</h3>
-              <p>Try another search or category.</p>
+              <p>Try another search, category or filter.</p>
             </div>
           )}
         </section>
@@ -756,7 +850,7 @@ export function ProductDetails({
       </button>
       <div className="details-grid">
         <div className="details-image">
-          <img src={product.image || FALLBACK_IMAGE} alt={product.name} />
+          <img src={product.image || FALLBACK_IMAGE} alt={product.name} onError={imgFallback} />
           <span>FRESH PICK</span>
         </div>
         <div className="details-copy">
@@ -780,18 +874,21 @@ export function ProductDetails({
             </span>
             <small>{product.stock} available</small>
           </div>
-          <label className="quantity-label">
+          <div className="quantity-label">
             Quantity
             <div className="quantity-control">
-              <button onClick={() => setQuantity(Math.max(1, quantity - 1))}>
+              <button aria-label="Decrease quantity" onClick={() => setQuantity(Math.max(1, quantity - 1))}>
                 <Icon name="minus" size={17} />
               </button>
-              <span>{quantity}</span>
-              <button onClick={() => setQuantity(Math.min(Math.max(1, product.stock), quantity + 1))}>
+              <span aria-live="polite">{quantity}</span>
+              <button
+                aria-label="Increase quantity"
+                onClick={() => setQuantity(Math.min(Math.max(1, product.stock), quantity + 1))}
+              >
                 <Icon name="plus" size={17} />
               </button>
             </div>
-          </label>
+          </div>
           <div className="details-buttons">
             <button
               className="button button-primary"
@@ -852,7 +949,7 @@ export function Cart({
           <section className="cart-list">
             {cart.map((item) => (
               <article className="cart-item" key={item.id}>
-                <img src={item.image || FALLBACK_IMAGE} alt={item.name} />
+                <img src={item.image || FALLBACK_IMAGE} alt={item.name} onError={imgFallback} />
                 <div className="cart-item-copy">
                   <small>{item.category}</small>
                   <h3>{item.name}</h3>
@@ -1097,7 +1194,7 @@ export function Checkout({
           <div className="summary-items">
             {cart.slice(0, 3).map((item) => (
               <div key={item.id}>
-                <img src={item.image || FALLBACK_IMAGE} alt="" />
+                <img src={item.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
                 <span>
                   {item.quantity}× {item.name}
                 </span>
@@ -1168,7 +1265,7 @@ export function Tracking({
 }: {
   orderId: string | null;
   navigate: (p: Page) => void;
-  notify: (m: string) => void;
+  notify: Notify;
 }) {
   const [order, setOrder] = useState<Order | null>(null);
   const [rider, setRider] = useState<Profile | null>(null);
@@ -1185,7 +1282,7 @@ export function Tracking({
       setOrder(next);
       setRider(next?.rider_id ? await fetchProfile(next.rider_id) : null);
     } catch (e) {
-      notify(errorMessage(e));
+      notify(errorMessage(e), "error");
     } finally {
       setLoading(false);
     }
@@ -1307,7 +1404,7 @@ export function Tracking({
                   notify("Order cancelled");
                   void load();
                 } catch (e) {
-                  notify(errorMessage(e));
+                  notify(errorMessage(e), "error");
                 }
               }}
             >
@@ -1399,7 +1496,7 @@ export function Account({
   setProfile,
   orders,
   address,
-  setAddress,
+  saveAddress: persistAddress,
   navigate,
   notify,
 }: {
@@ -1407,11 +1504,12 @@ export function Account({
   setProfile: (p: Profile) => void;
   orders: Order[];
   address: SavedAddress;
-  setAddress: (a: SavedAddress) => void;
+  saveAddress: (a: SavedAddress) => Promise<void>;
   navigate: (p: Page) => void;
-  notify: (m: string) => void;
+  notify: Notify;
 }) {
   const [editing, setEditing] = useState<"profile" | "address" | null>(null);
+  const [busy, setBusy] = useState(false);
   const active = orders.filter((o) => activeStatuses.includes(o.status)).length;
   const saveProfile = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -1420,25 +1518,36 @@ export function Account({
       full_name: String(data.get("name") ?? "").trim(),
       phone: String(data.get("phone") ?? "").trim() || null,
     };
+    setBusy(true);
     try {
       await updateMyProfile(profile.id, changes);
       setProfile({ ...profile, ...changes });
       setEditing(null);
       notify("Profile saved");
     } catch (err) {
-      notify(errorMessage(err));
+      notify(errorMessage(err), "error");
+    } finally {
+      setBusy(false);
     }
   };
-  const saveAddress = (e: FormEvent<HTMLFormElement>) => {
+  const saveAddress = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const data = new FormData(e.currentTarget);
-    setAddress({
-      address: String(data.get("address") ?? ""),
-      city: String(data.get("city") ?? ""),
-      province: String(data.get("province") ?? ""),
-    });
-    setEditing(null);
-    notify("Address saved");
+    setBusy(true);
+    try {
+      await persistAddress({
+        address: String(data.get("address") ?? "").trim(),
+        city: String(data.get("city") ?? "").trim(),
+        province: String(data.get("province") ?? "").trim(),
+      });
+      setEditing(null);
+      notify("Address saved");
+    } catch (err) {
+      notify(`Saved on this device only: ${errorMessage(err)}`, "error");
+      setEditing(null);
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <div className="account-page content-width">
@@ -1551,7 +1660,9 @@ export function Account({
               <button type="button" className="button button-outline" onClick={() => setEditing(null)}>
                 Cancel
               </button>
-              <button className="button button-primary">Save</button>
+              <button className="button button-primary" disabled={busy}>
+                {busy ? "Saving…" : "Save"}
+              </button>
             </div>
           </form>
         </div>
@@ -1600,77 +1711,169 @@ export function InfoModal({
   );
 }
 
-type ChatMessage = { from: "bot" | "user"; text: string; product?: Product };
+type ChatMessage = {
+  from: "bot" | "user";
+  text: string;
+  product?: Product;
+  action?: "track";
+  /** The bot understood the question (false = generic fallback). Used for admin stats. */
+  matched?: boolean;
+};
+
+const STOPWORDS = new Set(
+  "the and you have what whats with for any can are your there some does how much want need get give show please this that about would which today sell buy order recommend suggest good something like best popular".split(
+    " ",
+  ),
+);
 
 export function Chatbot({
   products,
+  hasActiveOrder,
+  onTrack,
   onClose,
   openProduct,
 }: {
   products: Product[];
+  hasActiveOrder: boolean;
+  onTrack: () => void;
   onClose: () => void;
   openProduct: (p: Product) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       from: "bot",
-      text: "Hi, I'm Ailyn AI. I can help you find meals, groceries and product information. What can I find for you?",
+      text: "Hi, I'm Ailyn AI. I can help you find meals, groceries and product information, or check on your order. What can I find for you?",
     },
   ]);
   const [input, setInput] = useState("");
-  const topRated = useMemo(
-    () => [...products].filter((p) => p.stock > 0).sort((a, b) => b.rating - a.rating)[0],
-    [products],
-  );
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let live = true;
+    void fetchActiveSuggestionTexts().then((list) => live && setSuggestions(list));
+    return () => {
+      live = false;
+    };
+  }, []);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages]);
 
   const answer = (question: string): ChatMessage => {
     const q = question.toLowerCase();
-    const words = q.split(/[^a-z]+/).filter((w) => w.length > 2);
-    const match = products.find((p) =>
-      words.some((w) => p.name.toLowerCase().includes(w) || p.category.toLowerCase().includes(w)),
-    );
-    if (q.includes("where") && q.includes("order")) {
-      return { from: "bot", text: "Open “My orders” and tap “Track order” to follow your rider live on the map." };
+    const has = (...keys: string[]) => keys.some((k) => q.includes(k));
+    const words = q.split(/[^a-z]+/).filter((w) => w.length > 2 && !STOPWORDS.has(w));
+    const bot = (text: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
+      from: "bot",
+      text,
+      matched: true,
+      ...extra,
+    });
+
+    if (!products.length) return bot("Our menu is still loading. Please try again in a moment.", { matched: false });
+
+    if (has("where is my", "where's my", "wheres my", "track", "my order", "my rider", "order status")) {
+      return hasActiveOrder
+        ? bot("Your order is being handled right now. Tap below to follow it live, including your rider on the map.", {
+            action: "track",
+          })
+        : bot("You don't have an active order at the moment. Your past orders are under “My orders”.", {
+            action: "track",
+          });
     }
-    if (q.includes("fee") || q.includes("delivery")) {
-      return {
-        from: "bot",
-        text: `Delivery is a flat ${money(DELIVERY_FEE)}, and your first order gets ${money(WELCOME_DISCOUNT)} off automatically.`,
-      };
+    if (has("fee", "shipping", "delivery cost", "delivery charge", "how much is delivery")) {
+      return bot(
+        `Delivery is a flat ${money(DELIVERY_FEE)}, and your first order gets ${money(WELCOME_DISCOUNT)} off automatically.`,
+      );
     }
-    if (match && (q.includes("ingredient") || q.includes("what's in") || q.includes("whats in"))) {
-      return {
-        from: "bot",
-        text: match.ingredients
-          ? `${match.name} contains: ${match.ingredients}`
-          : `${match.name}: ${match.description}`,
-        product: match,
-      };
+    if (has("discount", "promo", "voucher", "coupon")) {
+      return bot(`Your first order gets ${money(WELCOME_DISCOUNT)} off, applied automatically at checkout.`);
     }
+    if (has("gcash", "payment", "pay ", "cash", "cod")) {
+      return bot("You can pay cash on delivery, or pay the rider with GCash when your order arrives.");
+    }
+    if (has("how long", "eta", "arrive", "minutes", "how fast")) {
+      return bot("Most deliveries arrive in 30–45 minutes. You can follow every step live once you order.");
+    }
+    if (has("cancel")) {
+      return bot("You can cancel an order while it's still pending: open it in “My orders” and choose “Cancel order”.");
+    }
+
+    // Rank products by how well they match the question (name counts more than category).
+    const ranked = products
+      .map((p) => {
+        const name = p.name.toLowerCase();
+        const category = p.category.toLowerCase();
+        const score = words.reduce((s, w) => s + (name.includes(w) ? 2 : 0) + (category.includes(w) ? 1 : 0), 0);
+        return { p, score };
+      })
+      .filter((x) => x.score > 0)
+      .sort(
+        (a, b) =>
+          b.score - a.score || Number(b.p.stock > 0) - Number(a.p.stock > 0) || b.p.rating - a.p.rating,
+      )
+      .map((x) => x.p);
+    const match = ranked[0];
+
+    if (match && has("ingredient", "what's in", "whats in", "what is in", "contain", "made of", "allerg")) {
+      return bot(
+        match.ingredients ? `${match.name} contains: ${match.ingredients}` : `${match.name}: ${match.description}`,
+        { product: match },
+      );
+    }
+
+    if (has("recommend", "suggest", "best", "popular", "what should", "hungry", "craving")) {
+      const pool = (ranked.length ? ranked : products).filter((p) => p.stock > 0);
+      const wantsFood = has("meal", "food", "eat", "lunch", "dinner", "breakfast", "hungry", "craving");
+      const wantsGrocery = has("grocery", "groceries", "pantry");
+      const typed = pool.filter((p) => (wantsFood ? p.type === "food" : wantsGrocery ? p.type === "grocery" : true));
+      const pick = [...(typed.length ? typed : pool)].sort((a, b) => b.rating - a.rating)[0];
+      if (pick) {
+        return bot(`I recommend ${pick.name} (★ ${pick.rating}, ${money(pick.price)}). ${pick.description}`, {
+          product: pick,
+        });
+      }
+    }
+
     if (match) {
-      return {
-        from: "bot",
-        text: match.stock > 0
+      return bot(
+        match.stock > 0
           ? `Yes! ${match.name} is available for ${money(match.price)} (${match.stock} in stock).`
           : `${match.name} is sold out right now. Check back soon!`,
-        product: match,
-      };
+        { product: match },
+      );
     }
-    return topRated
+
+    if (/\b(hi|hello|hey|good (morning|afternoon|evening))\b/.test(q)) {
+      return bot("Hello! Ask me about a dish, a grocery item, delivery fees or your order.");
+    }
+
+    const favorite = [...products].filter((p) => p.stock > 0).sort((a, b) => b.rating - a.rating)[0];
+    return favorite
       ? {
           from: "bot",
-          text: `Based on what's popular, I recommend ${topRated.name}. It's rated ${topRated.rating}.`,
-          product: topRated,
+          text: `I couldn't find that in our catalog. A customer favorite right now is ${favorite.name}, rated ${favorite.rating}.`,
+          product: favorite,
+          matched: false,
         }
-      : { from: "bot", text: "Our menu is loading. Please try again in a moment." };
+      : { from: "bot", text: "I couldn't find that in our catalog right now.", matched: false };
   };
 
   const send = (question?: string) => {
-    const value = question || input;
-    if (!value.trim()) return;
-    setMessages((current) => [...current, { from: "user", text: value }, answer(value)]);
+    const value = (question ?? input).trim();
+    if (!value) return;
+    const reply = answer(value);
+    setMessages((current) => [...current, { from: "user", text: value }, reply]);
     setInput("");
+    logChat({
+      question: value,
+      answer: reply.text,
+      product_id: reply.product?.id ?? null,
+      matched: reply.matched ?? false,
+    });
   };
+
   return (
     <div className="chat-overlay" onMouseDown={onClose}>
       <aside className="chat-panel" onMouseDown={(e) => e.stopPropagation()}>
@@ -1688,13 +1891,13 @@ export function Chatbot({
             <Icon name="close" />
           </button>
         </header>
-        <div className="chat-messages">
+        <div className="chat-messages" aria-live="polite">
           {messages.map((message, i) => (
             <div key={i}>
               <div className={`message ${message.from}`}>{message.text}</div>
               {message.product && (
                 <button className="chat-product" onClick={() => openProduct(message.product!)}>
-                  <img src={message.product.image || FALLBACK_IMAGE} alt="" />
+                  <img src={message.product.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
                   <div>
                     <small>RECOMMENDED</small>
                     <strong>{message.product.name}</strong>
@@ -1703,23 +1906,32 @@ export function Chatbot({
                   <Icon name="arrow" />
                 </button>
               )}
+              {message.action === "track" && (
+                <button className="button button-soft chat-action" onClick={onTrack}>
+                  <Icon name="map" size={17} /> {hasActiveOrder ? "Track my order" : "View my orders"}
+                </button>
+              )}
             </div>
           ))}
+          <div ref={endRef} />
         </div>
-        <div className="suggested">
-          <span>Try asking</span>
-          <div>
-            {["What's in Chicken Adobo?", "Recommend a meal", "Do you have cooking oil?", "Delivery fee?"].map((q) => (
-              <button key={q} onClick={() => send(q)}>
-                {q}
-              </button>
-            ))}
+        {suggestions.length > 0 && (
+          <div className="suggested">
+            <span>Try asking</span>
+            <div>
+              {suggestions.map((q) => (
+                <button key={q} onClick={() => send(q)}>
+                  {q}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
         <div className="chat-input">
           <input
             placeholder="Ask about food or groceries..."
             value={input}
+            maxLength={500}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && send()}
           />

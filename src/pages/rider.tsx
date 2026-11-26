@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Icon, Logo, Spinner, Status, money } from "../shared";
+import { Icon, Logo, Notify, Spinner, Status, money } from "../shared";
 import {
   fetchMyProfile,
   fetchOrders,
@@ -25,6 +25,9 @@ import { OrderDetailsModal, OrderItemsList, OrderMap } from "../components/Order
 
 type Tab = "jobs" | "active" | "history" | "profile";
 const LOCATION_INTERVAL_MS = 10_000;
+// Realtime can't tell a rider that someone else took a job (that row is no longer visible to
+// them), so the lists also refresh on a timer and whenever the app comes back to the foreground.
+const REFRESH_INTERVAL_MS = 30_000;
 
 const isToday = (iso: string) => new Date(iso).toDateString() === new Date().toDateString();
 
@@ -35,7 +38,7 @@ export function RiderApp({
 }: {
   profile: Profile;
   setProfile: (p: Profile) => void;
-  notify: (m: string) => void;
+  notify: Notify;
 }) {
   const [tab, setTab] = useState<Tab>("jobs");
   const [openJobs, setOpenJobs] = useState<Order[]>([]);
@@ -43,6 +46,11 @@ export function RiderApp({
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [details, setDetails] = useState<Order | null>(null);
+  // Location sharing lives here (not in the deliveries tab) so it keeps running on every tab.
+  const [sharing, setSharing] = useState(false);
+  const [lastFix, setLastFix] = useState<Date | null>(null);
+  const [geoError, setGeoError] = useState("");
+  const lastSent = useRef(0);
 
   const refreshProfile = useCallback(() => {
     fetchMyProfile(profile.id)
@@ -64,7 +72,7 @@ export function RiderApp({
       setOpenJobs(jobs);
       setMine(assigned);
     } catch (e) {
-      notify(errorMessage(e));
+      notify(errorMessage(e), "error");
     } finally {
       setLoading(false);
     }
@@ -73,11 +81,65 @@ export function RiderApp({
     void load();
   }, [load]);
   useRealtime("rider-orders", [{ table: "orders" }], () => void load());
+  useEffect(() => {
+    if (!profile.rider_approved) return;
+    const timer = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
+    const onVisible = () => document.visibilityState === "visible" && void load();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [load, profile.rider_approved]);
 
   const active = mine.filter((o) => !["delivered", "cancelled"].includes(o.status));
   const history = mine.filter((o) => ["delivered", "cancelled"].includes(o.status));
   const deliveredToday = history.filter((o) => o.status === "delivered" && isToday(o.updated_at));
   const earnedToday = deliveredToday.reduce((sum, o) => sum + Number(o.delivery_fee), 0);
+  const activeIds = active.map((o) => o.id).join(",");
+
+  useEffect(() => {
+    if (!sharing || !activeIds) return;
+    if (!("geolocation" in navigator)) {
+      setGeoError("This device can't share its location.");
+      setSharing(false);
+      return;
+    }
+    const ids = activeIds.split(",");
+    const watch = navigator.geolocation.watchPosition(
+      (pos) => {
+        const now = Date.now();
+        if (now - lastSent.current < LOCATION_INTERVAL_MS) return;
+        lastSent.current = now;
+        setGeoError("");
+        setLastFix(new Date());
+        for (const id of ids) {
+          riderUpdateLocation(id, pos.coords.latitude, pos.coords.longitude).catch((e) =>
+            setGeoError(errorMessage(e)),
+          );
+        }
+      },
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          setGeoError("Location permission was denied. Allow it in your browser settings, then try again.");
+          setSharing(false);
+        } else {
+          setGeoError("Couldn't get your location. Trying again…");
+        }
+      },
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 },
+    );
+    return () => navigator.geolocation.clearWatch(watch);
+  }, [sharing, activeIds]);
+
+  const toggleSharing = () => {
+    lastSent.current = 0;
+    if (!sharing) {
+      setGeoError("");
+      notify("Location sharing on");
+    }
+    setSharing(!sharing);
+  };
 
   const run = async (orderId: string, action: () => Promise<void>, message: string) => {
     setBusyId(orderId);
@@ -86,7 +148,7 @@ export function RiderApp({
       notify(message);
       await load();
     } catch (e) {
-      notify(errorMessage(e));
+      notify(errorMessage(e), "error");
       await load();
     } finally {
       setBusyId(null);
@@ -99,7 +161,7 @@ export function RiderApp({
       setProfile({ ...profile, rider_online: !profile.rider_online });
       notify(profile.rider_online ? "You're offline" : "You're online and visible to dispatch");
     } catch (e) {
-      notify(errorMessage(e));
+      notify(errorMessage(e), "error");
     }
   };
 
@@ -126,6 +188,11 @@ export function RiderApp({
           </nav>
         )}
         <div className="rider-head-actions">
+          {sharing && active.length > 0 && (
+            <button className="gps-chip" onClick={() => setTab("active")} title="Sharing live location">
+              <span className="live-dot on" /> GPS live
+            </button>
+          )}
           {profile.rider_approved && (
             <button
               className={`online-toggle ${profile.rider_online ? "on" : ""}`}
@@ -282,7 +349,10 @@ export function RiderApp({
                 orders={active}
                 busyId={busyId}
                 run={run}
-                notify={notify}
+                sharing={sharing}
+                lastFix={lastFix}
+                geoError={geoError}
+                onToggleSharing={toggleSharing}
                 onDetails={setDetails}
                 goToJobs={() => setTab("jobs")}
               />
@@ -318,56 +388,23 @@ function ActiveDeliveries({
   orders,
   busyId,
   run,
-  notify,
+  sharing,
+  lastFix,
+  geoError,
+  onToggleSharing,
   onDetails,
   goToJobs,
 }: {
   orders: Order[];
   busyId: string | null;
   run: (id: string, action: () => Promise<void>, message: string) => Promise<void>;
-  notify: (m: string) => void;
+  sharing: boolean;
+  lastFix: Date | null;
+  geoError: string;
+  onToggleSharing: () => void;
   onDetails: (o: Order) => void;
   goToJobs: () => void;
 }) {
-  const [sharing, setSharing] = useState(false);
-  const [lastFix, setLastFix] = useState<Date | null>(null);
-  const [geoError, setGeoError] = useState("");
-  const lastSent = useRef(0);
-  const orderIds = orders.map((o) => o.id).join(",");
-
-  useEffect(() => {
-    if (!sharing || !orderIds) return;
-    if (!("geolocation" in navigator)) {
-      setGeoError("This device can't share its location.");
-      setSharing(false);
-      return;
-    }
-    const ids = orderIds.split(",");
-    const watch = navigator.geolocation.watchPosition(
-      (pos) => {
-        const now = Date.now();
-        if (now - lastSent.current < LOCATION_INTERVAL_MS) return;
-        lastSent.current = now;
-        setGeoError("");
-        setLastFix(new Date());
-        for (const id of ids) {
-          riderUpdateLocation(id, pos.coords.latitude, pos.coords.longitude).catch((e) =>
-            setGeoError(errorMessage(e)),
-          );
-        }
-      },
-      (err) => {
-        setGeoError(
-          err.code === err.PERMISSION_DENIED
-            ? "Location permission was denied. Allow it in your browser settings."
-            : "Couldn't get your location. Trying again…",
-        );
-      },
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 },
-    );
-    return () => navigator.geolocation.clearWatch(watch);
-  }, [sharing, orderIds]);
-
   if (!orders.length) {
     return (
       <div className="empty-state">
@@ -403,14 +440,7 @@ function ActiveDeliveries({
                 : "Turn this on so customers can follow you on the map.")}
           </small>
         </div>
-        <button
-          className={`button ${sharing ? "button-outline" : "button-primary"}`}
-          onClick={() => {
-            setSharing(!sharing);
-            lastSent.current = 0;
-            if (!sharing) notify("Location sharing on");
-          }}
-        >
+        <button className={`button ${sharing ? "button-outline" : "button-primary"}`} onClick={onToggleSharing}>
           {sharing ? "Stop sharing" : "Share location"}
         </button>
       </div>
@@ -561,7 +591,7 @@ function RiderProfile({
 }: {
   profile: Profile;
   setProfile: (p: Profile) => void;
-  notify: (m: string) => void;
+  notify: Notify;
   compact?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
@@ -580,7 +610,7 @@ function RiderProfile({
       setProfile({ ...profile, ...changes });
       notify("Profile saved");
     } catch (err) {
-      notify(errorMessage(err));
+      notify(errorMessage(err), "error");
     } finally {
       setBusy(false);
     }
@@ -640,7 +670,7 @@ function PendingApproval({
 }: {
   profile: Profile;
   setProfile: (p: Profile) => void;
-  notify: (m: string) => void;
+  notify: Notify;
 }) {
   return (
     <div className="pending-approval">

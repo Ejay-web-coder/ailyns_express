@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
-import { Icon, Logo, Spinner } from "./shared";
-import { errorMessage, supabase, supabaseConfigured } from "./lib/supabase";
+import { Icon, Logo, Notify, Spinner, Tone } from "./shared";
+import { errorMessage, friendlyAuthError, supabase, supabaseConfigured } from "./lib/supabase";
 import { becomeRider, clearIntent, fetchMyProfile, peekIntent, signOut } from "./lib/api";
 import type { Profile, Role } from "./lib/types";
 import { Landing, ResetPassword, RoleAuth } from "./pages/landing";
@@ -11,25 +11,56 @@ import { AdminApp } from "./pages/admin";
 
 const FRESH_ACCOUNT_MS = 15 * 60 * 1000;
 
-const initialPortal = (): Role | null => {
-  const portal = new URLSearchParams(window.location.search).get("portal");
-  return portal === "customer" || portal === "rider" || portal === "admin" ? portal : null;
+const asRole = (value: string | null): Role | null =>
+  value === "customer" || value === "rider" || value === "admin" ? value : null;
+
+const initialPortal = (): Role | null => asRole(new URLSearchParams(window.location.search).get("portal"));
+
+/**
+ * After start-up, find an auth failure left in the URL: an explicit error from Supabase / the
+ * provider, or a PKCE `code` that the client could not exchange (expired, already used, or the
+ * link was opened in a different browser than the one that started sign-in).
+ */
+const readUrlAuthError = (): string | null => {
+  const query = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const raw =
+    query.get("error_description") ||
+    hash.get("error_description") ||
+    query.get("error") ||
+    hash.get("error");
+  if (raw) return friendlyAuthError(raw);
+  if (query.get("code")) return friendlyAuthError("flow state");
+  return null;
 };
+
+const AUTH_URL_KEYS = ["code", "error", "error_code", "error_description", "portal", "type"];
+const cleanAuthParams = () => {
+  const url = new URL(window.location.href);
+  const hadQuery = AUTH_URL_KEYS.some((k) => url.searchParams.has(k));
+  const hadHashAuth = /(^|[#&])(error|access_token|error_description)=/.test(url.hash);
+  if (!hadQuery && !hadHashAuth) return;
+  for (const k of AUTH_URL_KEYS) url.searchParams.delete(k);
+  if (hadHashAuth) url.hash = "";
+  window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+};
+
+type AuthNotice = { text: string; error: boolean };
 
 function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [booting, setBooting] = useState(true);
   const [portal, setPortal] = useState<Role | null>(initialPortal);
-  const [authNotice, setAuthNotice] = useState("");
+  const [authNotice, setAuthNotice] = useState<AuthNotice | null>(null);
   const [recovery, setRecovery] = useState(false);
-  const [toast, setToast] = useState("");
-  const toastTimer = useRef<number>();
+  const [toast, setToast] = useState<{ message: string; tone: Tone } | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
 
-  const notify = useCallback((message: string) => {
-    setToast(message);
+  const notify = useCallback<Notify>((message, tone = "success") => {
+    setToast({ message, tone });
     window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(""), 2600);
+    toastTimer.current = window.setTimeout(() => setToast(null), tone === "error" ? 5500 : 2800);
   }, []);
 
   useEffect(() => {
@@ -39,7 +70,16 @@ function App() {
     }
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
-      if (!data.session) setBooting(false);
+      if (!data.session) {
+        const failure = readUrlAuthError();
+        if (failure) {
+          setPortal(peekIntent()?.role ?? initialPortal() ?? "customer");
+          setAuthNotice({ text: failure, error: true });
+          clearIntent();
+        }
+        setBooting(false);
+      }
+      cleanAuthParams();
     });
     const { data } = supabase.auth.onAuthStateChange((event, next) => {
       if (event === "PASSWORD_RECOVERY") setRecovery(true);
@@ -68,7 +108,7 @@ function App() {
               await becomeRider({});
               p = await fetchMyProfile(userId);
             } else {
-              notify("This account is registered as a customer, so we opened the customer app.");
+              notify("This account is registered as a customer, so we opened the customer app.", "info");
             }
           }
           if (intent.role === "admin" && p?.role !== "admin") {
@@ -76,15 +116,18 @@ function App() {
             await signOut();
             if (!cancelled) {
               setPortal("admin");
-              setAuthNotice("That account doesn't have admin access.");
+              setAuthNotice({ text: "That account doesn't have admin access.", error: true });
             }
             return;
           }
         }
         clearIntent();
-        if (!cancelled) setProfile(p);
+        if (!cancelled) {
+          setAuthNotice(null);
+          setProfile(p);
+        }
       } catch (e) {
-        if (!cancelled) notify(errorMessage(e));
+        if (!cancelled) notify(errorMessage(e), "error");
       } finally {
         if (!cancelled) setBooting(false);
       }
@@ -94,9 +137,9 @@ function App() {
     };
   }, [userId, notify]);
 
-  // Drop OAuth / portal query strings once handled so refreshes stay clean.
+  // Drop OAuth / portal query strings once signed in so refreshes stay clean.
   useEffect(() => {
-    if (window.location.search && session) window.history.replaceState(null, "", window.location.pathname);
+    if (session) cleanAuthParams();
   }, [session]);
 
   let content: React.ReactNode;
@@ -133,13 +176,14 @@ function App() {
         <RoleAuth
           key={portal}
           role={portal}
-          notice={authNotice}
+          notice={authNotice?.text}
+          noticeIsError={authNotice?.error}
           onBack={() => {
-            setAuthNotice("");
+            setAuthNotice(null);
             setPortal(null);
           }}
           onSwitchRole={(r) => {
-            setAuthNotice("");
+            setAuthNotice(null);
             setPortal(r);
           }}
         />
@@ -157,10 +201,16 @@ function App() {
   return (
     <div className="app">
       {toast && (
-        <div className="toast" role="status">
-          <Icon name="check" size={17} />
-          {toast}
-        </div>
+        <button
+          type="button"
+          className={`toast toast-${toast.tone}`}
+          role={toast.tone === "error" ? "alert" : "status"}
+          onClick={() => setToast(null)}
+          title="Dismiss"
+        >
+          <Icon name={toast.tone === "error" ? "alert" : toast.tone === "info" ? "info" : "check"} size={17} />
+          {toast.message}
+        </button>
       )}
       {content}
       {recovery && (
