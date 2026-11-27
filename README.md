@@ -19,7 +19,7 @@ Customer places order ──► Admin confirms / prepares ──► Rider accept
 ## Stack
 
 - React 19 + Vite + Tailwind 4 (static SPA, deployable to Vercel)
-- Supabase: Auth (email/password, Google, Facebook), Postgres with RLS, Realtime
+- Supabase: Auth (email/password, Google), Postgres with RLS, Realtime
 
 ## Local development
 
@@ -39,8 +39,7 @@ npm run dev                  # http://localhost:4173
    - `…_live_route_map.sql`: the store's location (one row, set by an admin under **Settings → Ailyn's store location**) and the optional drop-off pin customers set at checkout. The live map uses them to draw the route store → rider → customer.
 2. **Auth → URL configuration:** set **Site URL** to the production URL (e.g. `https://ailyns-express.vercel.app`) and add it plus `http://localhost:4173` to **Redirect URLs**. Password-reset and email-confirmation links fall back to the Site URL when the redirect isn't on this list, so a leftover `http://localhost:3000` breaks them.
 3. **Auth → Providers → Google:** create an OAuth client in Google Cloud Console (APIs & Services → Credentials → OAuth client ID → *Web application*). Add `https://<project-ref>.supabase.co/auth/v1/callback` as an authorized redirect URI, then paste the client ID and secret into Supabase.
-4. **Auth → Providers → Facebook:** create an app at developers.facebook.com, add *Facebook Login*, set the valid OAuth redirect URI to the same `…/auth/v1/callback`, then paste the App ID and secret into Supabase. While the Meta app is in **Development** mode only people listed under *App roles* can sign in; everyone else sees "App not active". Switch it to **Live** (it needs the Privacy Policy URL `/privacy`, the Data Deletion URL `/data-deletion` and an app icon).
-5. *(Optional)* Under **Auth → Providers → Email**, turn off "Confirm email" if new users should be able to sign in without confirming their email address first.
+4. *(Optional)* Under **Auth → Providers → Email**, turn off "Confirm email" if new users should be able to sign in without confirming their email address first.
 
 ### Creating the first admin
 
@@ -54,7 +53,7 @@ update public.profiles set role = 'admin' where email = 'you@example.com';
 
 Riders sign up from the Rider portal (or `/?portal=rider`; admins can copy this link from **Riders**). New riders appear in **Admin → Riders** as *Pending review* until an admin approves them. Approved riders who are online see confirmed, unassigned orders as open jobs.
 
-Signing in with Google or Facebook from the Rider portal converts a brand-new account into a rider account. An existing customer account that already has orders is never converted.
+Signing in with Google from the Rider portal converts a brand-new account into a rider account. An existing customer account that already has orders is never converted.
 
 ## Order status flow
 
@@ -83,7 +82,7 @@ Every question is saved to `chat_logs`. Customers can read only their own rows; 
 The site can be installed like an app on Android, iPhone/iPad, Windows, Mac and Chromebook. The landing page has an **Install app** button and a **Get the app** section. Chrome, Edge and Samsung Internet show a one-tap install dialog; Safari and other browsers get step-by-step instructions for the visitor's device.
 
 - `public/manifest.webmanifest`: app name, colors, icons and home-screen shortcuts (Order, Rider portal, Admin dashboard)
-- `public/icons/`: icons made from `branding/facebook-app-icon-1024.png`
+- `public/icons/`: icons made from `branding/app-icon-1024.png`
 - `public/sw.js`: service worker, registered only in production builds. Pages always load from the network; static files are cached and refreshed in the background; `public/offline.html` is shown when there's no connection. Supabase calls are never cached. Bump `VERSION` in `sw.js` when you change its caching rules.
 
 Layout tiers (in `src/index.css` and `src/roles.css`): desktop above 1100px, small desktop ≤1100px, tablet ≤850px (bottom tab bar for customers and riders; admin sidebar slides in from the menu button), phone ≤600px, small phone ≤380px.

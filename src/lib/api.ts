@@ -60,10 +60,10 @@ export function peekIntent(): AuthIntent | null {
   }
 }
 
-export async function signInWithProvider(provider: "google" | "facebook", role: Role) {
+export async function signInWithGoogle(role: Role) {
   rememberIntent(role);
   const { error } = await supabase.auth.signInWithOAuth({
-    provider,
+    provider: "google",
     options: { redirectTo: window.location.origin },
   });
   if (error) throw error;

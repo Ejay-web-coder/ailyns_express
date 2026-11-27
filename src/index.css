@@ -488,16 +488,8 @@
 }
 .social-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 12px;
-}
-.google-g {
-  color: #4285f4;
-  font-size: 18px;
-}
-.facebook-f {
-  color: #1877f2;
-  font-size: 21px;
 }
 .switch-auth {
   margin: 24px 0 8px;
@@ -3778,9 +3770,6 @@
   }
   .auth-form h1 {
     font-size: 32px;
-  }
-  .social-row {
-    grid-template-columns: 1fr 1fr;
   }
   .button {
     min-height: 48px;
