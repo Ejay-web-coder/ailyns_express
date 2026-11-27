@@ -681,9 +681,7 @@ export function RoleAuth({
                   ? role === "rider"
                     ? "Apply as rider"
                     : "Create my account"
-                  : role === "admin"
-                    ? "Login to dashboard"
-                    : "Login to my account"}
+                  : "Login"}
             </button>
           </form>
           <div className="divider">
