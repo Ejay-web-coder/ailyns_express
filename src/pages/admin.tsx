@@ -74,6 +74,8 @@ import {
 import { voucherState } from "../lib/vouchers";
 import { AdminReports, SalesChart } from "./admin-reports";
 import { AdminVouchers } from "./admin-vouchers";
+import { AdminReviews } from "./admin-reviews";
+import { OrderReviewSummary, RiderRatingTag } from "../components/Reviews";
 
 const adminNav = [
   ["Dashboard", "dashboard"],
@@ -81,6 +83,7 @@ const adminNav = [
   ["Riders", "bike"],
   ["Products", "box"],
   ["Customers", "customers"],
+  ["Reviews", "star"],
   ["Vouchers", "ticket"],
   ["Sales & Reports", "report"],
   ["Chatbot", "chat"],
@@ -157,6 +160,18 @@ export function AdminApp({
   const notices = useMemo(
     () => adminNotices(orders, profiles, profileById, profile.id),
     [orders, profiles, profileById, profile.id],
+  );
+  // Reviews are logged on the order timeline, so a new or edited review reloads the Reviews page.
+  const reviewKey = useMemo(
+    () =>
+      orders
+        .flatMap((o) => o.order_events ?? [])
+        .filter((e) => isReviewNote(e.note))
+        .map((e) => e.id)
+        .sort((a, b) => b - a)
+        .slice(0, 1)
+        .join(),
+    [orders],
   );
   // An order opened from a notification, kept by id so it follows live updates.
   const [openOrderId, setOpenOrderId] = useState<string | null>(null);
@@ -271,6 +286,8 @@ export function AdminApp({
                 go("Orders");
               }}
             />
+          ) : section === "Reviews" ? (
+            <AdminReviews profileById={profileById} refreshKey={reviewKey} notify={notify} />
           ) : section === "Vouchers" ? (
             <AdminVouchers vouchers={vouchers} orders={orders} reload={loadVouchers} notify={notify} />
           ) : section === "Sales & Reports" ? (
@@ -318,6 +335,9 @@ type Notice = {
   /** …or this admin section. */
   section?: string;
 };
+
+const isReviewNote = (note: string | null | undefined) =>
+  !!note && (note.startsWith("Customer left a review") || note.startsWith("Customer updated their review"));
 
 const NOTICE_DAYS = 7;
 const NOTICE_LIMIT = 40;
@@ -377,6 +397,17 @@ function orderNotice(order: Order, ev: OrderEvent, profileById: Map<string, Prof
       tone: "bad",
       title: `Order ${code} cancelled`,
       text: ev.actor_role === "customer" ? `${order.customer_name} cancelled it` : note,
+    };
+  }
+  // Reviews are logged with the order's status (delivered), so check them before "delivered".
+  if (isReviewNote(note)) {
+    const stars = Number(/rider (\d)★/.exec(note)?.[1] ?? 0);
+    return {
+      ...base,
+      icon: "star",
+      tone: stars && stars <= 2 ? "bad" : "good",
+      title: `${note.startsWith("Customer updated") ? "Review updated" : "New review"} on ${code}`,
+      text: `${order.customer_name} · ${note.slice(note.indexOf(":") + 1).trim()}`,
     };
   }
   if (ev.status === "delivered") {
@@ -1231,6 +1262,7 @@ function AdminOrderModal({
         ) : undefined
       }
     >
+      <OrderReviewSummary order={order} />
       <DeliveryFeeEditor order={order} viewer="admin" notify={notify} onSaved={() => reload?.()} />
     </OrderDetailsModal>
   );
@@ -1425,13 +1457,14 @@ function AdminRiders({
               <th>Availability</th>
               <th>Current job</th>
               <th>Delivered</th>
+              <th>Rating</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="empty-cell">
+                <td colSpan={9} className="empty-cell">
                   No riders yet. Share the rider sign-up link to onboard riders.
                 </td>
               </tr>
@@ -1481,6 +1514,7 @@ function AdminRiders({
                   <td>
                     <strong>{delivered}</strong>
                   </td>
+                  <td>{r.rider_rating_count ? <RiderRatingTag rider={r} /> : <span className="muted">—</span>}</td>
                   <td>
                     <div className="table-actions">
                       {r.rider_approved ? (
@@ -1572,7 +1606,8 @@ function AdminProducts({
       type: String(data.get("type")) as "food" | "grocery",
       price: Number(data.get("price")),
       stock: Math.max(0, Math.floor(Number(data.get("stock")))),
-      rating: Math.min(5, Math.max(0, Number(data.get("rating")) || 0)),
+      // Reviewed products have no rating field: their rating is the customers' average.
+      rating: data.has("rating") ? Math.min(5, Math.max(0, Number(data.get("rating")) || 0)) : editing.rating,
       image: String(data.get("image")).trim(),
       description: String(data.get("description")).trim(),
       ingredients: String(data.get("ingredients")).trim() || null,
@@ -1683,7 +1718,10 @@ function AdminProducts({
                       <img src={p.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
                       <div>
                         <strong>{p.name}</strong>
-                        <small>#PRD-{String(p.id).padStart(4, "0")}</small>
+                        <small>
+                          #PRD-{String(p.id).padStart(4, "0")}
+                          {p.review_count ? ` · ★ ${p.rating} (${p.review_count})` : ""}
+                        </small>
                       </div>
                     </div>
                   </td>
@@ -1765,7 +1803,17 @@ function AdminProducts({
               </label>
               <label>
                 Rating
-                <input name="rating" type="number" min="0" max="5" step="0.1" defaultValue={editing.rating} />
+                {"review_count" in editing && editing.review_count ? (
+                  <>
+                    {/* Customers' average; the database keeps it, so the form doesn't send it. */}
+                    <input value={`★ ${editing.rating}`} readOnly aria-describedby="rating-note" />
+                    <small id="rating-note" className="muted">
+                      Average of {editing.review_count} customer review{editing.review_count === 1 ? "" : "s"}
+                    </small>
+                  </>
+                ) : (
+                  <input name="rating" type="number" min="0" max="5" step="0.1" defaultValue={editing.rating} />
+                )}
               </label>
               <label className="check-label product-active">
                 <input name="active" type="checkbox" defaultChecked={editing.active !== false} /> Available to customers

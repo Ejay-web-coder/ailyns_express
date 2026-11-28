@@ -39,6 +39,7 @@ npm run dev                  # http://localhost:4173
    - `…_live_route_map.sql`: the store's location (one row, set by an admin under **Settings → Ailyn's store location**) and the optional drop-off pin customers set at checkout. The live map uses them to draw the route store → rider → customer.
    - `…_delivery_proof_photos.sql`: the private `delivery-proofs` storage bucket and the photo-proof step riders must complete to mark an order delivered (see below). Deploy the frontend **before** running it: once it's applied, the database refuses "delivered" from riders without photos, which an older app version doesn't send.
    - `…_gcash_qr_payments.sql`: GCash QR payments checked by an admin (see below): the public `store-assets` bucket for the store's QR, the private `payment-proofs` bucket for receipt screenshots, the order payment columns and their guards.
+   - `…_customer_reviews.sql`: star ratings and feedback for riders and items after delivery (see below), plus the averages on products and rider profiles.
 2. **Auth → URL configuration:** set **Site URL** to the production URL (e.g. `https://ailyns-express.vercel.app`) and add it plus `http://localhost:4173` to **Redirect URLs**. Password-reset and email-confirmation links fall back to the Site URL when the redirect isn't on this list, so a leftover `http://localhost:3000` breaks them.
 3. **Auth → Providers → Google:** create an OAuth client in Google Cloud Console (APIs & Services → Credentials → OAuth client ID → *Web application*). Add `https://<project-ref>.supabase.co/auth/v1/callback` as an authorized redirect URI, then paste the client ID and secret into Supabase.
 4. *(Optional)* Under **Auth → Providers → Email**, turn off "Confirm email" if new users should be able to sign in without confirming their email address first.
@@ -83,6 +84,14 @@ With a QR set, a customer who chooses GCash places the order first (so the total
 - The database won't move a GCash order past `pending` until its payment is verified, won't take a reference number that's already on another order, and won't let a customer cancel once they've sent a payment. The admin cancels and refunds instead.
 - Receipts are in the private `payment-proofs` bucket as `<customer id>/<order id>/<file>`; only that customer and admins can open them. When deleting an account, also delete the user's folder there.
 - Unpaid GCash orders don't expire on their own: cancel them from the admin portal.
+
+### Ratings and reviews
+
+Once an order is delivered, the customer can rate it from the tracking page or **My orders → Rate order**: 1–5 stars and an optional note for the rider, and 1–5 stars and an optional comment for each item. Sending it again replaces their review. Everything goes through `customer_review_order()`, which checks the order is theirs and delivered.
+
+- **Items:** reviews show on the product page with the reviewer's first name and last initial. A product's ★ rating becomes the average of its reviews once it has any (the admin's rating field turns read-only then).
+- **Riders:** the average shows to customers on the tracking page, to the rider under **History**, and to admins under **Riders**. The note for the rider is seen only by that rider and admins.
+- **Admin → Reviews** lists everything newest first, flags 1–2 star reviews, and can delete a review that's abusive or not about the order; the averages update by themselves. New reviews also appear in the notification bell and in the order's details.
 
 All writes to orders go through `SECURITY DEFINER` functions (`place_order`, `admin_update_order_status`, `rider_accept_order`, …). These recompute prices, check stock and enforce the allowed transitions, so the browser can't tamper with totals or skip steps.
 

@@ -49,6 +49,8 @@ import {
 import { OrderDetailsModal, OrderItemsList, OrderMap } from "../components/OrderDetails";
 import { DeliveryProofView } from "../components/DeliveryProof";
 import { GcashPayCard, PaymentOptions, PaymentTag } from "../components/GcashPayment";
+import { ProductReviews, RateOrderCard, ReviewModal, RiderRatingTag } from "../components/Reviews";
+import { canReview, countLabel } from "../lib/reviews";
 import { paymentLabel, paymentState } from "../lib/gcash";
 import { LocationPicker } from "../components/Maps";
 import { LatLng, geocodeOrderAddress, toLatLng, useGeocodedAddress, useStoreSettings } from "../lib/geo";
@@ -912,7 +914,7 @@ export function ProductDetails({
           <h1>{product.name}</h1>
           <div className="details-rating">
             <strong>★ {product.rating}</strong>
-            <span>Customer rating</span>
+            <span>{product.review_count ? `From ${countLabel(product.review_count, "review")}` : "Customer rating"}</span>
           </div>
           <p className="details-price">{money(product.price)}</p>
           <p className="details-description">{product.description}</p>
@@ -968,6 +970,7 @@ export function ProductDetails({
           </div>
         </div>
       </div>
+      <ProductReviews product={product} />
     </div>
   );
 }
@@ -1702,13 +1705,16 @@ export function Tracking({
       <div className="tracking-pay">
         <GcashPayCard order={order} />
       </div>
+      <RateOrderCard order={order} rider={rider} />
       <div className="tracking-layout">
         <section className="tracking-card">
           <OrderMap order={order} rider={rider} height={360} />
           <div className="rider-strip">
             <span className="rider-avatar">{rider ? initials(rider.full_name) : <Icon name="bike" size={18} />}</span>
             <div>
-              <strong>{rider ? rider.full_name : "Waiting for a rider"}</strong>
+              <strong>
+                {rider ? rider.full_name : "Waiting for a rider"} <RiderRatingTag rider={rider} />
+              </strong>
               <small>
                 {rider
                   ? [rider.vehicle, rider.plate_number].filter(Boolean).join(" · ") || "Ailyn's Express rider"
@@ -1798,6 +1804,7 @@ export function MemberOrders({
   onTrack: (id: string) => void;
 }) {
   const [details, setDetails] = useState<Order | null>(null);
+  const [rating, setRating] = useState<Order | null>(null);
   return (
     <div className="member-orders content-width">
       <div className="page-title">
@@ -1840,6 +1847,11 @@ export function MemberOrders({
                         Track order
                       </button>
                     )}
+                    {canReview(order) && (
+                      <button className="button button-soft" onClick={() => setRating(order)}>
+                        <Icon name="star" size={16} /> Rate order
+                      </button>
+                    )}
                     <button className="button button-outline" onClick={() => setDetails(order)}>
                       Order details
                     </button>
@@ -1854,6 +1866,7 @@ export function MemberOrders({
         <Icon name="back" /> Back to my account
       </button>
       {details && <OrderDetailsModal order={details} onClose={() => setDetails(null)} />}
+      {rating && <ReviewModal order={rating} rider={null} onClose={() => setRating(null)} />}
     </div>
   );
 }

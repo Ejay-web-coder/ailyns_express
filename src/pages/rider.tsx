@@ -27,6 +27,8 @@ import { DeliveryFeeEditor } from "../components/DeliveryFee";
 import { DeliveryProofCapture } from "../components/DeliveryProof";
 import { formatKm } from "../lib/fees";
 import { collectText } from "../lib/gcash";
+import { RiderFeedback, RiderRatingTag } from "../components/Reviews";
+import { formatRating } from "../lib/reviews";
 
 type Tab = "jobs" | "active" | "history" | "profile";
 const LOCATION_INTERVAL_MS = 10_000;
@@ -367,7 +369,7 @@ export function RiderApp({
               />
             )}
 
-            {tab === "history" && <RiderHistory orders={history} onDetails={setDetails} />}
+            {tab === "history" && <RiderHistory orders={history} profile={profile} onDetails={setDetails} />}
 
             {tab === "profile" && <RiderProfile profile={profile} setProfile={setProfile} notify={notify} />}
           </>
@@ -557,9 +559,18 @@ function ActiveDeliveries({
   );
 }
 
-function RiderHistory({ orders, onDetails }: { orders: Order[]; onDetails: (o: Order) => void }) {
+function RiderHistory({
+  orders,
+  profile,
+  onDetails,
+}: {
+  orders: Order[];
+  profile: Profile;
+  onDetails: (o: Order) => void;
+}) {
   const delivered = orders.filter((o) => o.status === "delivered");
   const earned = delivered.reduce((sum, o) => sum + Number(o.delivery_fee), 0);
+  const rated = profile.rider_rating_count ?? 0;
   return (
     <section>
       <div className="rider-section-head">
@@ -568,6 +579,7 @@ function RiderHistory({ orders, onDetails }: { orders: Order[]; onDetails: (o: O
           <h1>Delivery history</h1>
           <p className="muted">
             {delivered.length} delivered · {money(earned)} in delivery fees
+            {rated > 0 && ` · ★ ${formatRating(profile.rider_rating)} from ${rated} customer${rated === 1 ? "" : "s"}`}
           </p>
         </div>
       </div>
@@ -592,6 +604,15 @@ function RiderHistory({ orders, onDetails }: { orders: Order[]; onDetails: (o: O
               <b>{order.status === "delivered" ? `+${money(Number(order.delivery_fee))}` : "—"}</b>
             </button>
           ))}
+        </div>
+      )}
+      {profile.rider_rating_count !== undefined && (
+        <div className="rider-feedback">
+          <div className="rider-feedback-head">
+            <h2>What customers said</h2>
+            <RiderRatingTag rider={profile} />
+          </div>
+          <RiderFeedback refreshKey={rated} />
         </div>
       )}
     </section>
@@ -641,6 +662,7 @@ function RiderProfile({
             <p className="muted">{profile.email}</p>
           </div>
           <Status value={profile.rider_approved ? "Approved" : "Pending review"} />
+          <RiderRatingTag rider={profile} />
         </div>
       )}
       <div className="field-grid">

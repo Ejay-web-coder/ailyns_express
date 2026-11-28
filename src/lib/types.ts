@@ -23,6 +23,9 @@ export type Profile = {
   address: string | null;
   city: string | null;
   province: string | null;
+  /** Riders: average stars from customers (null until rated; absent before the customer_reviews migration). */
+  rider_rating?: number | null;
+  rider_rating_count?: number;
   created_at: string;
 };
 
