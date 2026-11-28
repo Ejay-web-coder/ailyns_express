@@ -261,6 +261,25 @@ const iconPaths: Record<string, React.ReactNode> = {
     </>
   ),
   bolt: <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z" />,
+  camera: (
+    <>
+      <path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z" />
+      <circle cx="12" cy="13.5" r="3.5" />
+    </>
+  ),
+  ticket: (
+    <>
+      <path d="M3 8a2 2 0 0 0 2-2h14a2 2 0 0 0 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 0-2 2H5a2 2 0 0 0-2-2v-2a2 2 0 0 0 0-4V8Z" />
+      <path d="M14 6v12" strokeDasharray="2 2" />
+      <path d="m7.5 14.5 3-5" />
+    </>
+  ),
+  stock: (
+    <>
+      <path d="m4 7 8-4 8 4-8 4-8-4ZM4 7v10l8 4 8-4V7" />
+      <path d="M12 21v-6M9.5 17.5 12 15l2.5 2.5" />
+    </>
+  ),
   dots: (
     <>
       <circle cx="12" cy="5" r="1" />

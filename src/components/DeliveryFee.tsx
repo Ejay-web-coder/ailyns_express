@@ -3,6 +3,7 @@ import { Notify, money } from "../shared";
 import { setDeliveryFee } from "../lib/api";
 import { feeRule, feeWasAdjusted, formatKm, hasFeeRule, riderFeeCap } from "../lib/fees";
 import { useStoreSettings } from "../lib/geo";
+import { paymentState } from "../lib/gcash";
 import { errorMessage } from "../lib/supabase";
 import type { Order } from "../lib/types";
 
@@ -144,7 +145,13 @@ export function DeliveryFeeEditor({
               <>
                 {" "}
                 New total: <b>{money(newTotal)}</b>
-                {order.payment_method === "cod" ? " cash." : " via GCash."}
+                {paymentState(order) === "verified"
+                  ? newTotal > Number(order.paid_amount ?? order.total)
+                    ? `. ${money(Number(order.paid_amount ?? order.total))} is already paid via GCash, so the rider collects ${money(newTotal - Number(order.paid_amount ?? order.total))}.`
+                    : `. ${money(Number(order.paid_amount ?? order.total))} is already paid via GCash.`
+                  : order.payment_method === "cod"
+                    ? " cash."
+                    : " via GCash."}
               </>
             )}
           </small>

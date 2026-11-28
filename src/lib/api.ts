@@ -10,6 +10,8 @@ import type {
   Profile,
   Role,
   StoreSettings,
+  Voucher,
+  VoucherInput,
 } from "./types";
 
 const ORDER_SELECT = "*, order_items(*), order_events(*)";
@@ -147,8 +149,9 @@ export async function saveProduct(product: ProductInput, id?: number) {
   else unwrap(await supabase.from("products").insert(product));
 }
 
-export async function deleteProduct(id: number) {
-  unwrap(await supabase.from("products").delete().eq("id", id));
+/** Show or hide a product for customers (instead of deleting it, so its sales history stays whole). */
+export async function setProductAvailable(id: number, active: boolean) {
+  unwrap(await supabase.from("products").update({ active }).eq("id", id));
 }
 
 export async function setProductStock(id: number, stock: number) {
@@ -178,11 +181,15 @@ export type DropOff = {
   roadKm: number | null;
 };
 
-/** Place the order. The database works out the delivery fee from the drop-off's distance to the store. */
+/**
+ * Place the order. The database works out the delivery fee from the drop-off's distance to the
+ * store, and checks and prices the voucher code (if any) itself.
+ */
 export async function placeOrder(
   items: { product_id: number; quantity: number }[],
   details: CheckoutDetails,
   dropOff: DropOff | null,
+  voucherCode?: string | null,
 ): Promise<Order> {
   const base = {
     p_items: items,
@@ -201,8 +208,13 @@ export async function placeOrder(
     p_lng: dropOff?.lng ?? null,
     p_pinned: dropOff?.pinned ?? false,
     p_road_km: dropOff?.roadKm != null ? Math.round(dropOff.roadKm * 1000) / 1000 : null,
+    // Only sent with a code, so ordering keeps working before the vouchers migration is applied.
+    ...(voucherCode ? { p_voucher: voucherCode } : {}),
   });
   if (!result.error) return result.data as Order;
+  if (voucherCode && (result.error as { code?: string }).code === "PGRST202") {
+    throw new Error("Vouchers aren't switched on yet. Remove the voucher and place your order again.");
+  }
   // PGRST202 = no function with these arguments: the distance_delivery_fee migration isn't applied
   // yet. Use the older flat-fee function, then save the pin separately as before.
   if ((result.error as { code?: string }).code !== "PGRST202") throw result.error;
@@ -280,6 +292,38 @@ export const setOrderDropOff = (orderId: string, lat: number, lng: number) =>
 export const setDeliveryFee = (orderId: string, fee: number, reason: string) =>
   rpc("set_delivery_fee", { p_order: orderId, p_fee: fee, p_reason: reason });
 
+// ------------------------------------------------------------- proof of delivery
+
+const PROOF_BUCKET = "delivery-proofs";
+
+/** The rider can photograph this order as proof (false until the delivery_proof_photos migration is applied). */
+export const supportsDeliveryProof = (order: Order) => order.proof_photos !== undefined;
+
+/** Upload one proof photo for an order out for delivery. Returns its storage path. */
+export async function uploadProofPhoto(order: Pick<Order, "id" | "customer_id">, photo: Blob): Promise<string> {
+  const path = `${order.customer_id}/${order.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  const { error } = await supabase.storage.from(PROOF_BUCKET).upload(path, photo, {
+    contentType: "image/jpeg",
+    upsert: false,
+  });
+  if (!error) return path;
+  if (/row-level security|unauthori[sz]ed|403/i.test(error.message)) {
+    throw new Error("Photos can only be added while you're delivering this order.");
+  }
+  throw error;
+}
+
+/** Finish the delivery with the uploaded photos (and an optional note the customer sees). */
+export const riderConfirmDelivery = (orderId: string, photoPaths: string[], note: string) =>
+  rpc("rider_confirm_delivery", { p_order: orderId, p_photos: photoPaths, p_note: note || null });
+
+/** Short-lived links to an order's proof photos (the bucket is private). */
+export async function proofPhotoUrls(paths: string[]): Promise<string[]> {
+  const { data, error } = await supabase.storage.from(PROOF_BUCKET).createSignedUrls(paths, 60 * 60);
+  if (error) throw error;
+  return (data ?? []).map((d) => d.signedUrl).filter((u): u is string => Boolean(u));
+}
+
 // ------------------------------------------------------------- store location
 
 /** The store row, or null when it can't be read (e.g. the live_route_map migration isn't applied yet). */
@@ -295,6 +339,71 @@ export async function updateStoreSettings(
   return unwrap(
     await supabase.from("store_settings").update(changes).eq("id", 1).select().single(),
   ) as StoreSettings;
+}
+
+// ------------------------------------------------------------- vouchers
+
+/** Postgres/PostgREST codes for "this table or function doesn't exist yet". */
+const MISSING = new Set(["42P01", "PGRST205", "PGRST202", "42883"]);
+const isMissing = (error: unknown) => MISSING.has(String((error as { code?: string } | null)?.code ?? ""));
+
+const toVoucher = (v: Voucher): Voucher => ({
+  ...v,
+  amount: Number(v.amount),
+  max_discount: v.max_discount == null ? null : Number(v.max_discount),
+  min_spend: Number(v.min_spend),
+});
+
+/**
+ * Vouchers the current user can see: admins get all of them, customers only the vouchers (not
+ * coupons) running today. null when the vouchers migration isn't applied yet.
+ */
+export async function fetchVouchers(): Promise<Voucher[] | null> {
+  const { data, error } = await supabase
+    .from("vouchers")
+    .select("*")
+    .order("starts_on", { ascending: false })
+    .order("id", { ascending: false });
+  if (error) {
+    if (isMissing(error)) return null;
+    throw error;
+  }
+  return (data as Voucher[]).map(toVoucher);
+}
+
+export async function saveVoucher(voucher: VoucherInput, id?: number) {
+  const result = id
+    ? await supabase.from("vouchers").update(voucher).eq("id", id).select().single()
+    : await supabase.from("vouchers").insert(voucher).select().single();
+  if ((result.error as { code?: string } | null)?.code === "23505") {
+    throw new Error(`The code ${voucher.code} is already used by another voucher. Pick a different code.`);
+  }
+  return toVoucher(unwrap(result) as Voucher);
+}
+
+export async function setVoucherActive(id: number, active: boolean) {
+  unwrap(await supabase.from("vouchers").update({ active }).eq("id", id).select().single());
+}
+
+/** A voucher checked for this customer and item total, with what it would take off. */
+export type CheckedVoucher = Pick<
+  Voucher,
+  "id" | "code" | "title" | "kind" | "discount_type" | "amount" | "max_discount" | "min_spend" | "starts_on" | "ends_on"
+> & { discount: number };
+
+/** Check a code before placing the order. Throws with the reason when it can't be used. */
+export async function checkVoucher(code: string, subtotal: number, fee: number | null): Promise<CheckedVoucher> {
+  const { data, error } = await supabase.rpc("check_voucher", {
+    p_code: code,
+    p_subtotal: Math.round(subtotal * 100) / 100,
+    p_fee: fee,
+  });
+  if (error) {
+    if (isMissing(error)) throw new Error("Vouchers aren't switched on yet.");
+    throw error;
+  }
+  const v = data as CheckedVoucher;
+  return { ...toVoucher(v as unknown as Voucher), discount: Number(v.discount) } as CheckedVoucher;
 }
 
 // ------------------------------------------------------------- chatbot

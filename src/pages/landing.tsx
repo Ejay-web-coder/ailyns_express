@@ -49,7 +49,7 @@ const portals: {
     tag: "MANAGE",
     title: "Admin",
     copy: "Confirm orders, dispatch riders, manage the catalog and watch the business in real time.",
-    perks: ["Order & rider dispatch", "Products & inventory", "Sales and rider reports"],
+    perks: ["Order & rider dispatch", "Products, stock & vouchers", "Sales and rider reports"],
     cta: "Continue as admin",
   },
 ];
@@ -449,7 +449,7 @@ const authCopy: Record<Role, { eyebrow: string; title: React.ReactNode; body: st
         <em>from one place.</em>
       </>
     ),
-    body: "Orders, riders, products, inventory and insights, designed for clear daily operations.",
+    body: "Orders, riders, products, vouchers and insights, designed for clear daily operations.",
   },
 };
 

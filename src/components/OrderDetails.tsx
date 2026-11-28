@@ -2,6 +2,8 @@ import { Icon, Status, imgFallback, money } from "../shared";
 import { Order, Profile, directionsUrl, formatDateTime, formatTime, statusLabel } from "../lib/types";
 import { OrderMap, Viewer } from "./Maps";
 import { feeWasAdjusted, formatKm } from "../lib/fees";
+import { DeliveryProofView } from "./DeliveryProof";
+import { paymentLabel } from "../lib/gcash";
 
 export { OrderMap };
 
@@ -61,12 +63,12 @@ export function OrderItemsList({ order }: { order: Order }) {
         )}
         {Number(order.discount) > 0 && (
           <div className="discount">
-            <span>Discount</span>
+            <span>{order.voucher_code ? `Voucher ${order.voucher_code}` : "Discount"}</span>
             <span>−{money(Number(order.discount))}</span>
           </div>
         )}
         <div className="grand">
-          <span>Total · {order.payment_method === "cod" ? "Cash on delivery" : "GCash"}</span>
+          <span>Total · {paymentLabel(order)}</span>
           <strong>{money(Number(order.total))}</strong>
         </div>
       </div>
@@ -81,6 +83,8 @@ export function OrderDetailsModal({
   actions,
   showMap = false,
   viewer = "admin",
+  showMissingProof = false,
+  top,
   children,
 }: {
   order: Order;
@@ -89,6 +93,10 @@ export function OrderDetailsModal({
   actions?: React.ReactNode;
   showMap?: boolean;
   viewer?: Viewer;
+  /** Say so when a delivered order has no proof photo (for admins). */
+  showMissingProof?: boolean;
+  /** Shown first, above the delivery details (e.g. the admin's GCash payment check). */
+  top?: React.ReactNode;
   /** Extra controls under the items (e.g. the admin's delivery fee editor). */
   children?: React.ReactNode;
 }) {
@@ -115,6 +123,7 @@ export function OrderDetailsModal({
         </div>
         <div className="order-modal-grid">
           <div>
+            {top}
             <h3>Delivery</h3>
             <p className="order-address">
               <Icon name="location" size={16} />
@@ -152,6 +161,7 @@ export function OrderDetailsModal({
               Open directions in Google Maps ↗
             </a>
             {showMap && <OrderMap order={order} rider={rider} viewer={viewer} height={260} />}
+            <DeliveryProofView order={order} showMissing={showMissingProof} />
             <h3>Items</h3>
             <OrderItemsList order={order} />
             {children}

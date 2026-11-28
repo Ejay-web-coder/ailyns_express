@@ -1,0 +1,521 @@
+/* GCash QR payments: checkout steps, the customer's pay card, the admin's review panel and settings. */
+
+/* ---------------------------------------------------------------- checkout */
+.gcash-steps {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0 0;
+  padding: 12px 14px 12px 32px;
+  border-radius: 12px;
+  background: var(--blush);
+  list-style: decimal outside;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.gcash-steps li::marker {
+  color: var(--pink);
+  font-weight: 800;
+}
+
+/* ---------------------------------------------------------------- customer pay card */
+.gcash-card {
+  display: grid;
+  gap: 14px;
+  margin: 22px 0;
+  padding: 18px;
+  border: 1px solid var(--rose);
+  border-radius: 17px;
+  background: white;
+  box-shadow: var(--shadow);
+  text-align: left;
+}
+.gcash-card.is-submitted {
+  border-color: #f3d9a8;
+  background: #fffaf0;
+  box-shadow: none;
+}
+.gcash-card.is-verified {
+  border-color: #bfe5d4;
+  background: #f3fbf7;
+  box-shadow: none;
+}
+.gcash-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.gcash-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.gcash-head small,
+.gcash-review-head small {
+  color: var(--pink);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+}
+.gcash-card.is-submitted .gcash-head small {
+  color: #9c620b;
+}
+.gcash-card.is-verified .gcash-head small {
+  color: var(--green);
+}
+.gcash-head strong {
+  font-size: 17px;
+  line-height: 1.3;
+}
+.gcash-head span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.gcash-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: #fff0f3;
+  color: var(--pink-dark);
+}
+.is-submitted .gcash-icon {
+  background: #fff1dd;
+  color: #9c620b;
+}
+.is-verified .gcash-icon {
+  background: #e8f8f1;
+  color: var(--green);
+}
+.gcash-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 11px;
+  background: #fdecef;
+  color: #a3172f;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.gcash-alert svg {
+  flex: none;
+  margin-top: 1px;
+}
+.gcash-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 800;
+}
+.gcash-step span {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--pink);
+  color: white;
+  font-size: 11px;
+}
+.gcash-pay {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px 18px;
+  align-items: center;
+}
+.gcash-qr {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  margin: 0;
+}
+.gcash-qr img {
+  display: block;
+  width: 200px;
+  max-width: 100%;
+  aspect-ratio: 1;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: white;
+  object-fit: contain;
+}
+.gcash-qr .button {
+  min-height: 38px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+.gcash-facts {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+.gcash-facts div {
+  display: grid;
+  gap: 2px;
+}
+.gcash-facts dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+.gcash-facts dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.gcash-amount {
+  color: var(--pink-dark);
+  font-size: 24px;
+  letter-spacing: -0.02em;
+}
+.gcash-ref {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 16px !important;
+  letter-spacing: 0.04em;
+}
+.gcash-copy {
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: var(--pink-dark);
+  font-family: "DM Sans", sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.gcash-tip {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.gcash-muted {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.gcash-error {
+  color: #c51c39;
+  font-size: 12px;
+}
+.gcash-form {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.gcash-form label,
+.gcash-decide label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.gcash-form label small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.gcash-form input,
+.gcash-decide input,
+.gcash-decide textarea {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  outline: none;
+  background: #fffcfd;
+  font-weight: 500;
+}
+.gcash-form input {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 16px;
+  letter-spacing: 0.04em;
+}
+.gcash-decide textarea {
+  min-height: 70px;
+  padding-top: 12px;
+  resize: vertical;
+}
+.gcash-form input:focus,
+.gcash-decide input:focus,
+.gcash-decide textarea:focus {
+  border-color: var(--pink);
+  box-shadow: 0 0 0 3px #e9296812;
+}
+.gcash-form .form-error {
+  margin: 0;
+}
+.gcash-upload figure {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+}
+.gcash-upload figure img {
+  width: 92px;
+  max-height: 180px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  object-fit: cover;
+  object-position: top;
+}
+.gcash-upload figure .button {
+  min-height: 40px;
+  font-size: 12px;
+}
+.gcash-add {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 18px 14px;
+  border: 1.5px dashed #e7b9c6;
+  border-radius: 13px;
+  background: #fffafb;
+  color: var(--pink-dark);
+}
+.gcash-add span {
+  font-size: 13px;
+  font-weight: 800;
+}
+.gcash-add small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.gcash-sent {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.gcash-proof {
+  display: block;
+  width: 96px;
+  height: 170px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f6eff1;
+}
+.gcash-proof img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+}
+.gcash-proof-ph {
+  animation: gcash-pulse 1.2s ease-in-out infinite alternate;
+}
+@keyframes gcash-pulse {
+  to {
+    opacity: 0.5;
+  }
+}
+
+/* ---------------------------------------------------------------- payment tag */
+.pay-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: #f5eef0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.pay-tag.pay-submitted {
+  background: #fff1dd;
+  color: #9c620b;
+}
+.pay-tag.pay-verified {
+  background: #e8f8f1;
+  color: var(--green);
+}
+.pay-tag.pay-rejected,
+.pay-tag.pay-unpaid {
+  background: #fdecef;
+  color: #a3172f;
+}
+
+/* ---------------------------------------------------------------- admin review */
+.gcash-review {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #fffafb;
+}
+.gcash-review.is-submitted {
+  border-color: #f3d9a8;
+  background: #fffaf0;
+}
+.gcash-review.is-verified {
+  border-color: #bfe5d4;
+  background: #f3fbf7;
+}
+.gcash-review-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.gcash-review-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gcash-review-head strong {
+  font-size: 15px;
+}
+.gcash-review .gcash-sent {
+  grid-template-columns: 120px minmax(0, 1fr);
+}
+.gcash-review .gcash-proof {
+  width: 120px;
+  height: 220px;
+}
+.gcash-decide {
+  display: grid;
+  gap: 10px;
+}
+.gcash-checklist {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  list-style: decimal outside;
+}
+.gcash-checklist li::marker {
+  color: #9c620b;
+  font-weight: 800;
+}
+.gcash-received {
+  max-width: 220px;
+}
+.gcash-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.gcash-reasons button {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: white;
+  color: var(--ink);
+  font-size: 11px;
+}
+.gcash-reasons button.active {
+  border-color: var(--pink);
+  background: #fff0f3;
+  color: var(--pink-dark);
+}
+.gcash-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.gcash-actions .button {
+  min-height: 42px;
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------- admin settings */
+.gcash-settings-body {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.gcash-settings-qr {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+}
+.gcash-settings-qr img,
+.gcash-qr-empty {
+  width: 200px;
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: white;
+  object-fit: contain;
+}
+.gcash-settings-qr img {
+  padding: 8px;
+}
+.gcash-qr-empty {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 6px;
+  border-style: dashed;
+  color: var(--muted);
+  font-size: 12px;
+}
+.gcash-settings-qr .gcash-actions {
+  justify-content: center;
+}
+.gcash-settings small.full-field {
+  display: block;
+  margin-top: -6px;
+  line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------- tracking page */
+.tracking-pay .gcash-card {
+  margin: 0 0 22px;
+}
+
+@media (max-width: 600px) {
+  .gcash-card {
+    padding: 15px;
+  }
+  .gcash-pay {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .gcash-qr img {
+    width: 220px;
+  }
+  .gcash-settings-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .gcash-actions .button {
+    flex: 1 1 auto;
+  }
+}
+@media (max-width: 380px) {
+  .gcash-sent,
+  .gcash-review .gcash-sent {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .gcash-proof,
+  .gcash-review .gcash-proof {
+    width: 100%;
+    height: 240px;
+  }
+}

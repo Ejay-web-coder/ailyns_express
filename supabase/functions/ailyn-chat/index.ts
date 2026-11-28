@@ -14,7 +14,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const MODEL = (Deno.env.get("GEMINI_MODEL")?.trim() || "gemini-3.5-flash-lite").replace(/^models\//, "");
-// Keep in sync with place_order() in the migrations, WELCOME_DISCOUNT in user.tsx and
+// Keep in sync with place_order() in the migrations, WELCOME_DISCOUNT in src/lib/vouchers.ts and
 // DEFAULT_FEE_RULE in src/lib/fees.ts. The live fee rule is read from store_settings.
 const WELCOME_DISCOUNT = 30;
 const DEFAULT_BASE_FEE = 49;
@@ -90,7 +90,24 @@ type Order = {
   delivery_fee: number;
   payment_method: string;
   order_items: { name: string; quantity: number }[] | null;
+  /** GCash QR payment, read separately (absent before the gcash_qr_payments migration). */
+  payment_status?: string | null;
+  payment_note?: string | null;
 };
+
+const GCASH_PAYMENT: Record<string, string> = {
+  unpaid: "GCash QR, not paid yet: on the order page, scan the store's QR, pay the total, then send the Ref No. and a receipt screenshot",
+  submitted: "GCash QR, receipt sent: the store is checking the payment, then confirms the order",
+  verified: "GCash QR, paid and verified",
+  rejected: "GCash QR, payment not accepted: send a new receipt on the order page",
+};
+
+function paymentFact(o: Order) {
+  if (o.payment_method !== "gcash") return "cash on delivery";
+  const text = GCASH_PAYMENT[o.payment_status ?? ""];
+  if (!text) return "GCash on arrival";
+  return o.payment_status === "rejected" && o.payment_note ? `${text} (store's reason: ${clip(o.payment_note, 150)})` : text;
+}
 
 /** The store row's fee columns; null when they can't be read (migration not applied yet). */
 type FeeRow = {
@@ -114,7 +131,37 @@ function deliveryFeeFact(row: FeeRow) {
   return `depends on the road distance from Ailyn's store to the customer: ${rule}. Checkout shows the exact fee once the customer enters their address or pins their location; it can't be quoted here without one. For heavy, bulky or many items the rider may adjust the fee; the customer sees the new fee and the reason on their order.`;
 }
 
-function systemPrompt(products: Product[], orders: Order[], welcomeEligible: boolean, feeRow: FeeRow) {
+type VoucherRow = {
+  code: string;
+  title: string;
+  discount_type: "amount" | "percent" | "free_delivery";
+  amount: number;
+  max_discount: number | null;
+  min_spend: number;
+  ends_on: string;
+};
+
+// Same wording as describeDiscount() in src/lib/vouchers.ts.
+function voucherFact(v: VoucherRow) {
+  const cap = v.max_discount != null ? ` up to ${peso(v.max_discount)}` : "";
+  const what =
+    v.discount_type === "amount"
+      ? `${peso(v.amount)} off the items`
+      : v.discount_type === "percent"
+        ? `${Number(v.amount)}% off the items${cap}`
+        : `free delivery${cap}`;
+  const min = Number(v.min_spend) > 0 ? `, minimum spend ${peso(v.min_spend)} on items` : "";
+  return `${v.code} "${v.title}": ${what}${min}, until ${v.ends_on} (Philippine date)`;
+}
+
+function systemPrompt(
+  products: Product[],
+  orders: Order[],
+  welcomeEligible: boolean,
+  feeRow: FeeRow,
+  vouchers: VoucherRow[],
+  gcashOnline: boolean,
+) {
   const catalog = products
     .map((p) =>
       [
@@ -142,7 +189,7 @@ function systemPrompt(products: Product[], orders: Order[], welcomeEligible: boo
             `placed ${manilaTime(o.created_at)}`,
             `total ${peso(o.total)}`,
             `delivery fee ${peso(o.delivery_fee)}`,
-            o.payment_method === "gcash" ? "GCash on arrival" : "cash on delivery",
+            paymentFact(o),
             items ? `items: ${items}` : "",
           ]
             .filter(Boolean)
@@ -178,10 +225,19 @@ Store facts
       ? "This customer hasn't ordered yet, so their next order gets it."
       : "This customer has already ordered, so it no longer applies to them."
   }
-- Payment: cash on delivery, or GCash paid to the rider when the order arrives.
+- Vouchers running today: ${
+    vouchers.length
+      ? `${vouchers.map(voucherFact).join("; ")}. Customers pick one in the order summary at checkout. One discount per order: they get whichever saves more, the voucher or the welcome discount.`
+      : "none right now. The store also shares secret coupon codes (for example on Facebook) that customers type in at checkout; you don't know those codes."
+  }
+- Payment: ${
+    gcashOnline
+      ? "cash on delivery, or GCash by QR. With GCash the customer places the order first, then on the order page scans Ailyn's GCash QR, pays the exact total, types the reference number (Ref No.) and adds a screenshot of the GCash receipt. The order stays Pending until the store checks that the payment came in and matches, then it's confirmed. If the store can't accept it, the customer sees why and sends a new receipt."
+      : "cash on delivery, or GCash paid to the rider when the order arrives."
+  }
 - Delivery usually takes 30–45 minutes. Customers follow their order and rider live on a map from My orders.
 - Order steps: Pending → Confirmed → Being prepared → Ready for pickup → Out for delivery → Delivered.
-- Customers can cancel an order only while it is still Pending: My orders → open the order → Cancel order.
+- Customers can cancel an order only while it is still Pending: My orders → open the order → Cancel order. Once they've sent a GCash payment, only the store can cancel it (and refund them), so they should message the store.
 
 Catalog (#id | name | type · category | price | stock | rating | description | ingredients)
 ${catalog || "The catalog is empty right now."}
@@ -255,7 +311,7 @@ Deno.serve(async (req) => {
     }
 
     // ---- grounding data, read as the customer
-    const [catalogRes, ordersRes, placedRes, feeRes] = await Promise.all([
+    const [catalogRes, ordersRes, placedRes, feeRes, voucherRes, payRes, gcashRes] = await Promise.all([
       supabase
         .from("products")
         .select("id, name, type, category, price, stock, rating, description, ingredients")
@@ -280,6 +336,20 @@ Deno.serve(async (req) => {
         .select("lat, delivery_base_fee, delivery_base_km, delivery_per_km")
         .eq("id", 1)
         .maybeSingle(),
+      // Row-level security only returns vouchers (not coupons) that are running today.
+      supabase
+        .from("vouchers")
+        .select("code, title, discount_type, amount, max_discount, min_spend, ends_on")
+        .order("ends_on")
+        .limit(10),
+      // GCash QR payments, apart from the queries above so they keep working before that migration.
+      supabase
+        .from("orders")
+        .select("code, payment_status, payment_note")
+        .eq("customer_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(5),
+      supabase.from("store_settings").select("gcash_qr_path").eq("id", 1).maybeSingle(),
     ]);
     if (catalogRes.error) throw catalogRes.error;
     if (ordersRes.error) throw ordersRes.error;
@@ -288,6 +358,16 @@ Deno.serve(async (req) => {
     const welcomeEligible = !placedRes.error && (placedRes.count ?? 0) === 0;
     // Before the distance_delivery_fee migration these columns don't exist: describe the flat fee.
     const feeRow = feeRes.error ? null : (feeRes.data as FeeRow);
+    // Before the vouchers migration the table doesn't exist: say there are none.
+    const vouchers = voucherRes.error ? [] : ((voucherRes.data ?? []) as VoucherRow[]);
+    // Before the gcash_qr_payments migration: GCash is paid to the rider, and orders have no payment status.
+    const gcashOnline = !gcashRes.error && !!(gcashRes.data as { gcash_qr_path: string | null } | null)?.gcash_qr_path;
+    if (!payRes.error) {
+      const pay = new Map(
+        ((payRes.data ?? []) as Pick<Order, "code" | "payment_status" | "payment_note">[]).map((p) => [p.code, p]),
+      );
+      for (const o of orders) Object.assign(o, pay.get(o.code));
+    }
 
     // ---- ask Gemini
     const contents: { role: "user" | "model"; parts: { text: string }[] }[] = [];
@@ -305,7 +385,7 @@ Deno.serve(async (req) => {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": geminiKey },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt(products, orders, welcomeEligible, feeRow) }] },
+          systemInstruction: { parts: [{ text: systemPrompt(products, orders, welcomeEligible, feeRow, vouchers, gcashOnline) }] },
           contents,
           generationConfig: {
             temperature: 0.4,

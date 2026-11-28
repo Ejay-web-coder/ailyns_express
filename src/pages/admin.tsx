@@ -18,13 +18,14 @@ import {
   adminSetRiderApproval,
   adminUpdateStatus,
   deleteChatSuggestion,
-  deleteProduct,
   fetchChatLogs,
   fetchChatSuggestions,
   fetchOrders,
   fetchProducts,
   fetchProfiles,
+  fetchVouchers,
   saveProduct,
+  setProductAvailable,
   setProductStock,
   signOut,
   updateChatSuggestion,
@@ -40,6 +41,7 @@ import {
   OrderEvent,
   OrderStatus,
   Profile,
+  Voucher,
   activeStatuses,
   formatDateTime,
   formatTime,
@@ -50,8 +52,28 @@ import {
 import { OrderDetailsModal } from "../components/OrderDetails";
 import { LocationPicker } from "../components/Maps";
 import { DeliveryFeeEditor } from "../components/DeliveryFee";
+import { GcashReviewPanel, GcashSettingsPanel, PaymentTag } from "../components/GcashPayment";
+import { cancelOrderQuestion, paymentBlocksConfirm } from "../lib/gcash";
 import { LatLng, refreshStoreLocation, toLatLng, useStoreSettings } from "../lib/geo";
 import { FeeRule, describeFeeRule, feeForKm, feeRule, hasFeeRule } from "../lib/fees";
+import {
+  DAY,
+  LOW_STOCK,
+  PeriodId,
+  busiestHour,
+  change,
+  inRange,
+  isSale,
+  lowStock,
+  periodRange,
+  previousRange,
+  productSales,
+  salesBuckets,
+  summarize,
+} from "../lib/sales";
+import { voucherState } from "../lib/vouchers";
+import { AdminReports, SalesChart } from "./admin-reports";
+import { AdminVouchers } from "./admin-vouchers";
 
 const adminNav = [
   ["Dashboard", "dashboard"],
@@ -59,15 +81,13 @@ const adminNav = [
   ["Riders", "bike"],
   ["Products", "box"],
   ["Customers", "customers"],
-  ["Inventory", "bag"],
+  ["Vouchers", "ticket"],
   ["Sales & Reports", "report"],
   ["Chatbot", "chat"],
   ["Settings", "settings"],
 ] as const;
 
 const allStatuses = Object.keys(statusLabel) as OrderStatus[];
-const LOW_STOCK = 10;
-const DAY = 86_400_000;
 
 const greeting = () => {
   const h = new Date().getHours();
@@ -92,6 +112,9 @@ export function AdminApp({
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(true);
   const [orderSearch, setOrderSearch] = useState("");
+  const [productStatus, setProductStatus] = useState("All status");
+  // undefined while loading, null when the vouchers migration isn't applied yet.
+  const [vouchers, setVouchers] = useState<Voucher[] | null | undefined>(undefined);
 
   const loadProducts = useCallback(
     () => fetchProducts().then(setProducts).catch((e) => notify(errorMessage(e), "error")),
@@ -105,15 +128,27 @@ export function AdminApp({
     () => fetchProfiles().then(setProfiles).catch((e) => notify(errorMessage(e), "error")),
     [notify],
   );
+  const loadVouchers = useCallback(
+    () =>
+      fetchVouchers()
+        .then(setVouchers)
+        .catch((e) => {
+          setVouchers((v) => v ?? []);
+          notify(errorMessage(e), "error");
+        }),
+    [notify],
+  );
 
   useEffect(() => {
     Promise.all([loadProducts(), loadOrders(), loadProfiles()]).finally(() => setLoading(false));
-  }, [loadProducts, loadOrders, loadProfiles]);
+    void loadVouchers();
+  }, [loadProducts, loadOrders, loadProfiles, loadVouchers]);
 
   useRealtime("admin-orders", [{ table: "orders" }, { table: "order_events" }], () => void loadOrders());
   // Stock moves with orders, and other admins may edit the catalog.
   useRealtime("admin-products", [{ table: "products" }], () => void loadProducts());
   useRealtime("admin-profiles", [{ table: "profiles" }], () => void loadProfiles());
+  useRealtime("admin-vouchers", vouchers === null ? [] : [{ table: "vouchers" }], () => void loadVouchers());
 
   const riders = profiles.filter((p) => p.role === "rider");
   const customers = profiles.filter((p) => p.role === "customer");
@@ -197,8 +232,14 @@ export function AdminApp({
               products={products}
               customers={customers}
               riders={riders}
+              vouchers={vouchers}
               profileById={profileById}
               setSection={go}
+              showLowStock={() => {
+                setProductStatus("Low stock");
+                go("Products");
+              }}
+              reloadProducts={loadProducts}
               notify={notify}
             />
           ) : section === "Orders" ? (
@@ -214,7 +255,13 @@ export function AdminApp({
           ) : section === "Riders" ? (
             <AdminRiders riders={riders} orders={orders} notify={notify} reload={loadProfiles} />
           ) : section === "Products" ? (
-            <AdminProducts products={products} reload={loadProducts} notify={notify} />
+            <AdminProducts
+              products={products}
+              statusFilter={productStatus}
+              setStatusFilter={setProductStatus}
+              reload={loadProducts}
+              notify={notify}
+            />
           ) : section === "Customers" ? (
             <AdminCustomers
               customers={customers}
@@ -224,10 +271,18 @@ export function AdminApp({
                 go("Orders");
               }}
             />
-          ) : section === "Inventory" ? (
-            <AdminInventory products={products} reload={loadProducts} notify={notify} />
+          ) : section === "Vouchers" ? (
+            <AdminVouchers vouchers={vouchers} orders={orders} reload={loadVouchers} notify={notify} />
           ) : section === "Sales & Reports" ? (
-            <AdminReports orders={orders} products={products} customers={customers} riders={riders} notify={notify} />
+            <AdminReports
+              orders={orders}
+              products={products}
+              customers={customers}
+              riders={riders}
+              profileById={profileById}
+              downloadOrders={(list, name) => downloadOrdersCsv(list, profileById, name)}
+              notify={notify}
+            />
           ) : section === "Chatbot" ? (
             <AdminChatbot notify={notify} profileById={profileById} products={products} />
           ) : (
@@ -326,6 +381,15 @@ function orderNotice(order: Order, ev: OrderEvent, profileById: Map<string, Prof
   }
   if (ev.status === "delivered") {
     return { ...base, icon: "check", tone: "good", title: `Order ${code} delivered`, text: `${who} delivered it to ${order.customer_name}` };
+  }
+  if (note.startsWith("GCash payment sent")) {
+    return {
+      ...base,
+      icon: "wallet",
+      tone: "new",
+      title: `GCash payment to check on ${code}`,
+      text: `${order.customer_name} · ${money(Number(order.total))} · ${note.split(" · ")[1] ?? "receipt sent"}`,
+    };
   }
   if (note.startsWith("Delivery fee changed")) {
     return {
@@ -474,76 +538,73 @@ function NotificationBell({
   );
 }
 
-// ------------------------------------------------------------------ analytics helpers
+// ------------------------------------------------------------------ dashboard
 
-type Bucket = { label: string; food: number; grocery: number };
+const revenueOf = (orders: Order[]) => orders.filter(isSale).reduce((sum, o) => sum + Number(o.total), 0);
 
-function revenueBuckets(orders: Order[], products: Product[], range: string): Bucket[] {
-  const typeOf = new Map(products.map((p) => [p.id, p.type]));
-  const now = new Date();
-  let buckets: { label: string; start: number; end: number }[];
-  if (range === "Year") {
-    buckets = Array.from({ length: 12 }, (_, i) => {
-      const d = new Date(now.getFullYear(), now.getMonth() - 11 + i, 1);
-      const end = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-      return { label: d.toLocaleString("en", { month: "narrow" }), start: d.getTime(), end: end.getTime() };
-    });
-  } else {
-    const days = range === "30 days" ? 30 : 7;
-    const size = range === "30 days" ? 3 : 1;
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() + DAY;
-    buckets = Array.from({ length: days / size }, (_, i) => {
-      const start = today - (days - i * size) * DAY;
-      const d = new Date(start);
-      return {
-        label: size === 1 ? d.toLocaleString("en", { weekday: "narrow" }) : String(d.getDate()),
-        start,
-        end: start + size * DAY,
-      };
-    });
-  }
-  return buckets.map((b) => {
-    const bucket: Bucket = { label: b.label, food: 0, grocery: 0 };
-    for (const order of orders) {
-      if (order.status === "cancelled") continue;
-      const t = new Date(order.created_at).getTime();
-      if (t < b.start || t >= b.end) continue;
-      for (const item of order.order_items ?? []) {
-        const type = (item.product_id && typeOf.get(item.product_id)) || "food";
-        bucket[type] += Number(item.price) * item.quantity;
-      }
+const dashRanges: [PeriodId, string, string][] = [
+  ["today", "Today", "today"],
+  ["7d", "7 days", "last 7 days"],
+  ["30d", "30 days", "last 30 days"],
+  ["12m", "12 months", "last 12 months"],
+];
+
+/** Stock count with a Save button, for restocking right from a list. */
+function StockEditor({
+  product,
+  reload,
+  notify,
+}: {
+  product: Product;
+  reload: () => Promise<unknown>;
+  notify: Notify;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const value = draft ?? String(product.stock);
+  const dirty = draft != null && draft.trim() !== String(product.stock);
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const n = Number(value);
+    if (value.trim() === "" || !Number.isInteger(n) || n < 0 || n > 100000) {
+      notify("Stock must be a whole number, 0 or more", "error");
+      return;
     }
-    return bucket;
-  });
-}
+    setBusy(true);
+    try {
+      await setProductStock(product.id, n);
+      await reload();
+      setDraft(null);
+      notify(`${product.name}: ${n} in stock`);
+    } catch (err) {
+      notify(errorMessage(err), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
 
-const rangeStart = (range: string) =>
-  Date.now() - (range === "Year" || range === "This year" ? 365 : range === "30 days" || range === "This month" ? 30 : 7) * DAY;
-
-const inRange = (orders: Order[], range: string) => {
-  const since = rangeStart(range);
-  return orders.filter((o) => new Date(o.created_at).getTime() >= since);
-};
-
-const revenueOf = (orders: Order[]) =>
-  orders.filter((o) => o.status !== "cancelled").reduce((sum, o) => sum + Number(o.total), 0);
-
-function SalesChart({ buckets }: { buckets: Bucket[] }) {
-  const max = Math.max(1, ...buckets.map((b) => Math.max(b.food, b.grocery)));
   return (
-    <div className="bar-chart">
-      {buckets.map((b, i) => (
-        <div className="bar-group" key={i} title={`Food ${money(b.food)} · Grocery ${money(b.grocery)}`}>
-          <span style={{ height: `${Math.max(2, (b.food / max) * 90)}%` }} />
-          <span style={{ height: `${Math.max(2, (b.grocery / max) * 90)}%` }} />
-          <small>{b.label}</small>
-        </div>
-      ))}
-    </div>
+    <form className="stock-edit" onSubmit={save}>
+      <input
+        type="number"
+        min="0"
+        step="1"
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => setDraft(e.target.value)}
+        aria-label={`Stock for ${product.name}`}
+      />
+      <button disabled={!dirty || busy}>{busy ? "…" : "Save"}</button>
+    </form>
   );
 }
 
-// ------------------------------------------------------------------ dashboard
+function StockBadge({ stock }: { stock: number }) {
+  if (stock === 0) return <span className="stock-badge out">Out of stock</span>;
+  if (stock < LOW_STOCK) return <span className="stock-badge low">{stock} left</span>;
+  return null;
+}
 
 function AdminDashboard({
   profile,
@@ -551,8 +612,11 @@ function AdminDashboard({
   products,
   customers,
   riders,
+  vouchers,
   profileById,
   setSection,
+  showLowStock,
+  reloadProducts,
   notify,
 }: {
   profile: Profile;
@@ -560,38 +624,104 @@ function AdminDashboard({
   products: Product[];
   customers: Profile[];
   riders: Profile[];
+  vouchers: Voucher[] | null | undefined;
   profileById: Map<string, Profile>;
   setSection: (s: string) => void;
+  showLowStock: () => void;
+  reloadProducts: () => Promise<unknown>;
   notify: Notify;
 }) {
-  const [range, setRange] = useState("7 days");
-  const scoped = inRange(orders, range);
-  const approved = riders.filter((r) => r.rider_approved);
-  const online = approved.filter((r) => r.rider_online);
-  const needsRider = orders.filter(
-    (o) => !o.rider_id && ["confirmed", "preparing", "ready"].includes(o.status),
+  const [rangeId, setRangeId] = useState<PeriodId>("7d");
+  const [bestType, setBestType] = useState<"all" | Product["type"]>("all");
+  const rangeLabel = dashRanges.find(([id]) => id === rangeId)?.[2] ?? "";
+
+  const range = useMemo(() => periodRange(rangeId), [rangeId]);
+  const scoped = useMemo(() => inRange(orders, range), [orders, range]);
+  const s = useMemo(() => summarize(scoped), [scoped]);
+  const prev = useMemo(() => summarize(inRange(orders, previousRange(range))), [orders, range]);
+  // The summary compares today with the chosen period (or with yesterday when that is today).
+  const today = useMemo(() => inRange(orders, periodRange("today")), [orders]);
+  const other = useMemo(
+    () => (rangeId === "today" ? inRange(orders, periodRange("yesterday")) : scoped),
+    [orders, scoped, rangeId],
   );
-  const stats: [string, string, string, string][] = [
-    [money(revenueOf(scoped)), "Sales", `Last ${range}`, "report"],
-    [String(scoped.length), "Orders", `Last ${range}`, "orders"],
-    [String(customers.length), "Customers", "Registered", "customers"],
-    [`${online.length}/${approved.length}`, "Riders online", `${riders.length - approved.length} awaiting approval`, "bike"],
-    [String(orders.filter((o) => o.status === "pending").length), "Pending orders", "Needs review", "food"],
-    [String(products.filter((p) => p.stock < LOW_STOCK).length), "Low stock", "Under 10 units", "bag"],
+  const sToday = useMemo(() => summarize(today), [today]);
+  const sOther = useMemo(() => summarize(other), [other]);
+  const sold = useMemo(() => productSales(scoped, products), [scoped, products]);
+  const sold30 = useMemo(
+    () => new Map(productSales(inRange(orders, periodRange("30d")), products).map((r) => [r.productId, r.qty])),
+    [orders, products],
+  );
+  const buckets = useMemo(() => salesBuckets(scoped, products, range), [scoped, products, range]);
+  const low = useMemo(() => lowStock(products), [products]);
+  const peak = useMemo(() => busiestHour(scoped), [scoped]);
+
+  const approved = riders.filter((r) => r.rider_approved);
+  const available = approved.filter((r) => r.rider_online);
+  const pending = orders.filter((o) => o.status === "pending").length;
+  const needsRider = orders.filter((o) => !o.rider_id && ["confirmed", "preparing", "ready"].includes(o.status));
+  const newCustomers = customers.filter((c) => {
+    const t = new Date(c.created_at).getTime();
+    return t >= range.start && t < range.end;
+  }).length;
+  const best = sold.filter((r) => bestType === "all" || r.type === bestType).slice(0, 5);
+  const voucherUses = new Map<number, number>();
+  for (const o of orders) {
+    if (o.voucher_id != null && isSale(o)) voucherUses.set(o.voucher_id, (voucherUses.get(o.voucher_id) ?? 0) + 1);
+  }
+  const running = (vouchers ?? []).filter((v) => voucherState(v, voucherUses.get(v.id) ?? 0) === "running");
+  const outCount = low.filter((p) => p.stock === 0).length;
+  const vs = (now: number, before: number) => {
+    const c = change(now, before);
+    return c ? `${c} vs previous ${rangeId === "today" ? "day" : "period"}` : `Same as previous ${rangeId === "today" ? "day" : "period"}`;
+  };
+
+  const stats: { value: string; label: string; detail: string; icon: string; down?: boolean; go?: () => void }[] = [
+    { value: money(s.sales), label: "Sales", detail: vs(s.sales, prev.sales), icon: "report", down: s.sales < prev.sales },
+    { value: String(s.paid), label: "Orders", detail: vs(s.paid, prev.paid), icon: "orders", down: s.paid < prev.paid },
+    {
+      value: String(customers.length),
+      label: "Customers",
+      detail: newCustomers ? `${newCustomers} new · ${rangeLabel}` : "Registered",
+      icon: "customers",
+    },
+    {
+      value: `${available.length}/${approved.length}`,
+      label: "Riders available",
+      detail: `${riders.length - approved.length} awaiting approval`,
+      icon: "bike",
+      go: () => setSection("Riders"),
+    },
+    {
+      value: String(pending),
+      label: "Pending orders",
+      detail: pending ? "Needs review" : "All caught up",
+      icon: "food",
+      down: pending > 0,
+      go: () => setSection("Orders"),
+    },
+    {
+      value: String(low.length),
+      label: "Low stock",
+      detail: low.length ? (outCount ? `${outCount} out of stock` : `Under ${LOW_STOCK} units`) : "All stocked",
+      icon: "stock",
+      down: low.length > 0,
+      go: showLowStock,
+    },
   ];
 
-  const sold = new Map<string, { name: string; image: string; qty: number; price: number }>();
-  for (const order of orders) {
-    if (order.status === "cancelled") continue;
-    for (const item of order.order_items ?? []) {
-      const key = String(item.product_id ?? item.name);
-      const row = sold.get(key) ?? { name: item.name, image: item.image, qty: 0, price: Number(item.price) };
-      row.qty += item.quantity;
-      sold.set(key, row);
-    }
-  }
-  const best = [...sold.values()].sort((a, b) => b.qty - a.qty).slice(0, 4);
-  const buckets = revenueBuckets(orders, products, range);
+  const summaryRows: [string, (x: ReturnType<typeof summarize>) => string][] = [
+    ["Net sales", (x) => money(x.sales)],
+    ["Orders", (x) => String(x.paid)],
+    ["Delivered", (x) => String(x.delivered)],
+    ["In progress", (x) => String(x.inProgress)],
+    ["Cancelled", (x) => String(x.cancelled)],
+    ["Items sold", (x) => String(x.itemsSold)],
+    ["Average order", (x) => money(x.avgOrder)],
+    ["Delivery fees", (x) => money(x.deliveryFees)],
+    ["Discounts given", (x) => (x.discounts ? `−${money(x.discounts)}` : money(0))],
+  ];
+  const otherTitle = rangeId === "today" ? "Yesterday" : dashRanges.find(([id]) => id === rangeId)?.[1] ?? "";
 
   return (
     <>
@@ -603,26 +733,37 @@ function AdminDashboard({
           <p>Here's what's happening with Ailyn's Express right now.</p>
         </div>
         <div className="date-filter">
-          {["7 days", "30 days", "Year"].map((r) => (
-            <button key={r} className={range === r ? "active" : ""} onClick={() => setRange(r)}>
-              {r}
+          {dashRanges.map(([id, text]) => (
+            <button key={id} className={rangeId === id ? "active" : ""} onClick={() => setRangeId(id)}>
+              {text}
             </button>
           ))}
         </div>
       </div>
       <div className="stats-grid">
-        {stats.map(([value, label, change, icon]) => (
-          <div className="stat-card" key={label}>
-            <span>
-              <Icon name={icon} />
-            </span>
-            <div>
-              <small>{label}</small>
-              <strong>{value}</strong>
-              <em>{change}</em>
+        {stats.map(({ value, label, detail, icon, down, go }) => {
+          const body = (
+            <>
+              <span>
+                <Icon name={icon} />
+              </span>
+              <div>
+                <small>{label}</small>
+                <strong>{value}</strong>
+                <em className={down ? "down" : ""}>{detail}</em>
+              </div>
+            </>
+          );
+          return go ? (
+            <button className={`stat-card clickable ${label === "Low stock" && low.length ? "alert" : ""}`} key={label} onClick={go}>
+              {body}
+            </button>
+          ) : (
+            <div className="stat-card" key={label}>
+              {body}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       {needsRider.length > 0 && (
         <div className="inventory-alert dispatch-alert">
@@ -631,33 +772,204 @@ function AdminDashboard({
             <strong>
               {needsRider.length} order{needsRider.length === 1 ? "" : "s"} waiting for a rider
             </strong>
-            <p>Online riders can accept them from their job list, or you can assign one now.</p>
+            <p>Available riders can accept them from their job list, or you can assign one now.</p>
           </div>
           <button onClick={() => setSection("Orders")}>Dispatch</button>
         </div>
       )}
+
+      <div className="admin-grid-main">
+        <section className="panel sales-panel summary-panel">
+          <div className="panel-title">
+            <div>
+              <h3>Summary</h3>
+              <p>
+                Today vs {rangeId === "today" ? "yesterday" : `the ${rangeLabel}`}
+              </p>
+            </div>
+            <button onClick={() => setSection("Sales & Reports")}>Full report</button>
+          </div>
+          <table className="summary-table">
+            <thead>
+              <tr>
+                <th />
+                <th>Today</th>
+                <th>{otherTitle}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaryRows.map(([label, value]) => (
+                <tr key={label}>
+                  <th scope="row">{label}</th>
+                  <td>{value(sToday)}</td>
+                  <td>{value(sOther)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <ul className="summary-notes">
+            <li>
+              <Icon name="food" size={16} />
+              {sold[0] ? (
+                <span>
+                  Top seller ({rangeLabel}): <b>{sold[0].name}</b>, {sold[0].qty} sold
+                </span>
+              ) : (
+                <span>No sales in the {rangeLabel} yet</span>
+              )}
+            </li>
+            {peak && (
+              <li>
+                <Icon name="clock" size={16} />
+                <span>
+                  Busiest time: <b>{peak.label}</b> ({peak.orders} order{peak.orders === 1 ? "" : "s"})
+                </span>
+              </li>
+            )}
+            <li>
+              <Icon name="ticket" size={16} />
+              {vouchers === null ? (
+                <span>Vouchers aren't switched on yet</span>
+              ) : running.length ? (
+                <span>
+                  Vouchers running: <b>{running.map((v) => v.code).join(", ")}</b>
+                </span>
+              ) : (
+                <span>
+                  No vouchers running.{" "}
+                  <button className="text-link" onClick={() => setSection("Vouchers")}>
+                    Create one
+                  </button>
+                </span>
+              )}
+            </li>
+            <li className={low.length ? "warn" : ""}>
+              <Icon name="stock" size={16} />
+              <span>
+                {low.length
+                  ? `${low.length} product${low.length === 1 ? " is" : "s are"} low on stock${outCount ? `, ${outCount} sold out` : ""}`
+                  : "Every product is well stocked"}
+              </span>
+            </li>
+          </ul>
+        </section>
+
+        <section className={`panel best-panel low-panel ${low.length ? "has-low" : ""}`}>
+          <div className="panel-title">
+            <div>
+              <h3>Low stock</h3>
+              <p>Under {LOW_STOCK} units · restock right here</p>
+            </div>
+            <button onClick={showLowStock}>View in products</button>
+          </div>
+          {low.length === 0 ? (
+            <div className="low-empty">
+              <Icon name="check" size={22} />
+              <p>Every available product has {LOW_STOCK} or more units.</p>
+            </div>
+          ) : (
+            low.slice(0, 7).map((p) => (
+              <div className={`best-item low-item ${p.stock === 0 ? "out" : ""}`} key={p.id}>
+                <img src={p.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
+                <div>
+                  <strong>{p.name}</strong>
+                  <small>
+                    <StockBadge stock={p.stock} /> {sold30.get(p.id) ? `${sold30.get(p.id)} sold in 30 days` : p.category}
+                  </small>
+                </div>
+                <StockEditor product={p} reload={reloadProducts} notify={notify} />
+              </div>
+            ))
+          )}
+          {low.length > 7 && (
+            <button className="show-more" onClick={showLowStock}>
+              +{low.length - 7} more low-stock products
+            </button>
+          )}
+        </section>
+      </div>
+
       <div className="admin-grid-main">
         <section className="panel sales-panel">
           <div className="panel-title">
             <div>
               <h3>Sales overview</h3>
-              <p>Revenue by category · Last {range}</p>
+              <p>Item sales by type · {rangeLabel}</p>
             </div>
             <strong>
-              {money(revenueOf(scoped))} <small>this period</small>
+              {money(s.sales)} <small>net sales</small>
             </strong>
           </div>
           <SalesChart buckets={buckets} />
           <div className="chart-legend">
             <span>
               <i />
-              Food sales
+              Meals
             </span>
             <span>
               <i />
-              Grocery sales
+              Products
             </span>
           </div>
+        </section>
+        <section className="panel best-panel">
+          <div className="panel-title">
+            <div>
+              <h3>Best sellers</h3>
+              <p>By units sold · {rangeLabel}</p>
+            </div>
+            <button onClick={() => setSection("Sales & Reports")}>All sales</button>
+          </div>
+          <div className="date-filter type-filter">
+            {(
+              [
+                ["all", "All"],
+                ["food", "Meals"],
+                ["grocery", "Products"],
+              ] as const
+            ).map(([id, text]) => (
+              <button key={id} className={bestType === id ? "active" : ""} onClick={() => setBestType(id)}>
+                {text}
+              </button>
+            ))}
+          </div>
+          {best.length === 0 ? (
+            <p className="muted small-note">
+              {sold.length ? `No ${bestType === "food" ? "meals" : "products"} sold in the ${rangeLabel}.` : `No sales in the ${rangeLabel} yet.`}
+            </p>
+          ) : (
+            best.map((r, i) => {
+              const stock = r.product?.stock;
+              const isLow = stock != null && r.product?.active !== false && stock < LOW_STOCK;
+              return (
+                <div className={`best-item ${isLow ? "low-item" : ""} ${stock === 0 ? "out" : ""}`} key={r.key}>
+                  <b>{i + 1}</b>
+                  <img src={r.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
+                  <div>
+                    <strong>{r.name}</strong>
+                    <small>
+                      {r.qty} sold · {money(r.revenue)}
+                      {r.type ? ` · ${r.type === "food" ? "Meal" : "Product"}` : ""}
+                    </small>
+                  </div>
+                  {isLow ? <StockBadge stock={stock} /> : <span>{r.product ? money(r.product.price) : "—"}</span>}
+                </div>
+              );
+            })
+          )}
+        </section>
+      </div>
+
+      <div className="admin-grid-main">
+        <section className="panel recent-orders">
+          <div className="panel-title">
+            <div>
+              <h3>Recent orders</h3>
+              <p>Latest customer activity</p>
+            </div>
+            <button onClick={() => setSection("Orders")}>View all orders</button>
+          </div>
+          <OrderTable orders={orders.slice(0, 6)} riders={riders} profileById={profileById} compact notify={notify} />
         </section>
         <section className="panel best-panel">
           <div className="panel-title">
@@ -683,55 +995,13 @@ function AdminDashboard({
                         ? `#${job.code} · ${statusLabel[job.status]}`
                         : rider.rider_online
                           ? "Available"
-                          : "Offline"}
+                          : "Unavailable"}
                     </small>
                   </div>
                   <span>{rider.vehicle ?? ""}</span>
                 </div>
               );
             })
-          )}
-        </section>
-      </div>
-      <div className="admin-grid-main">
-        <section className="panel recent-orders">
-          <div className="panel-title">
-            <div>
-              <h3>Recent orders</h3>
-              <p>Latest customer activity</p>
-            </div>
-            <button onClick={() => setSection("Orders")}>View all orders</button>
-          </div>
-          <OrderTable
-            orders={orders.slice(0, 6)}
-            riders={riders}
-            profileById={profileById}
-            compact
-            notify={notify}
-          />
-        </section>
-        <section className="panel best-panel">
-          <div className="panel-title">
-            <div>
-              <h3>Best sellers</h3>
-              <p>By units sold</p>
-            </div>
-            <button onClick={() => setSection("Products")}>View all</button>
-          </div>
-          {best.length === 0 ? (
-            <p className="muted small-note">Sales will appear after the first orders.</p>
-          ) : (
-            best.map((p, i) => (
-              <div className="best-item" key={p.name}>
-                <b>{i + 1}</b>
-                <img src={p.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
-                <div>
-                  <strong>{p.name}</strong>
-                  <small>{p.qty} sold</small>
-                </div>
-                <span>{money(p.price)}</span>
-              </div>
-            ))
           )}
         </section>
       </div>
@@ -774,7 +1044,7 @@ function OrderTable({
   };
 
   const changeStatus = (order: Order, status: OrderStatus) => {
-    if (status === "cancelled" && !window.confirm(`Cancel order #${order.code}? Stock will be restored.`)) return;
+    if (status === "cancelled" && !window.confirm(cancelOrderQuestion(order))) return;
     void act(order.id, () => adminUpdateStatus(order.id, status), `#${order.code} → ${statusLabel[status]}`);
   };
 
@@ -818,7 +1088,15 @@ function OrderTable({
                 {!compact && <td>{itemsSummary(order.order_items)}</td>}
                 <td>
                   <strong>{money(Number(order.total))}</strong>
-                  <small>{order.payment_method === "cod" ? "COD" : "GCash"}</small>
+                  <small>
+                    {order.payment_status ? (
+                      <PaymentTag order={order} short />
+                    ) : order.payment_method === "cod" ? (
+                      "COD"
+                    ) : (
+                      "GCash"
+                    )}
+                  </small>
                 </td>
                 <td>
                   {compact || closed ? (
@@ -863,7 +1141,7 @@ function OrderTable({
                         )}
                         {approved.map((r) => (
                           <option key={r.id} value={r.id}>
-                            {r.full_name} {r.rider_online ? "● online" : "○ offline"}
+                            {r.full_name} {r.rider_online ? "● available" : "○ unavailable"}
                           </option>
                         ))}
                       </select>
@@ -910,7 +1188,7 @@ function AdminOrderModal({
   const [busy, setBusy] = useState(false);
 
   const changeStatus = async (status: OrderStatus) => {
-    if (status === "cancelled" && !window.confirm(`Cancel order #${order.code}? Stock will be restored.`)) return;
+    if (status === "cancelled" && !window.confirm(cancelOrderQuestion(order))) return;
     setBusy(true);
     try {
       await adminUpdateStatus(order.id, status);
@@ -935,13 +1213,16 @@ function AdminOrderModal({
       rider={order.rider_id ? profileById.get(order.rider_id) : null}
       onClose={onClose}
       showMap
+      showMissingProof
+      top={<GcashReviewPanel key={order.id} order={order} notify={notify} onDone={() => reload?.()} />}
       actions={
         order.status === "pending" ? (
           <>
             <button className="button button-outline" disabled={busy} onClick={() => void changeStatus("cancelled")}>
               Cancel order
             </button>
-            {step("confirmed", "Confirm order")}
+            {/* A GCash order is confirmed by verifying its payment, in the panel at the top. */}
+            {!paymentBlocksConfirm(order) && step("confirmed", "Confirm order")}
           </>
         ) : order.status === "confirmed" ? (
           step("preparing", "Start preparing")
@@ -972,7 +1253,7 @@ function AdminOrders({
   notify: Notify;
   reload: () => void;
 }) {
-  const [filter, setFilter] = useState<"all" | OrderStatus | "unassigned">("all");
+  const [filter, setFilter] = useState<"all" | OrderStatus | "unassigned" | "payment">("all");
   const q = search.toLowerCase();
   const matches = orders.filter(
     (o) =>
@@ -982,12 +1263,20 @@ function AdminOrders({
       o.city.toLowerCase().includes(q),
   );
   const unassigned = (o: Order) => !o.rider_id && ["confirmed", "preparing", "ready"].includes(o.status);
+  const toCheck = (o: Order) => o.payment_status === "submitted" && o.status !== "cancelled";
   const visible = matches.filter((o) =>
-    filter === "all" ? true : filter === "unassigned" ? unassigned(o) : o.status === filter,
+    filter === "all"
+      ? true
+      : filter === "unassigned"
+        ? unassigned(o)
+        : filter === "payment"
+          ? toCheck(o)
+          : o.status === filter,
   );
-  const tabs: ["all" | OrderStatus | "unassigned", string, number][] = [
+  const tabs: ["all" | OrderStatus | "unassigned" | "payment", string, number][] = [
     ["all", "All orders", matches.length],
     ["pending", "Pending", matches.filter((o) => o.status === "pending").length],
+    ["payment", "GCash to check", matches.filter(toCheck).length],
     ["unassigned", "Needs rider", matches.filter(unassigned).length],
     ["preparing", "Preparing", matches.filter((o) => o.status === "preparing").length],
     ["out_for_delivery", "Out for delivery", matches.filter((o) => o.status === "out_for_delivery").length],
@@ -1021,7 +1310,8 @@ function AdminOrders({
       </section>
       <p className="prototype-note">
         Flow: Pending → Confirmed → Preparing → Ready for pickup → Out for delivery (rider) → Delivered (rider).
-        Riders see unassigned confirmed orders in their job list.
+        Riders see unassigned confirmed orders in their job list. A GCash QR order is confirmed by verifying its
+        payment: open it from “GCash to check”.
       </p>
     </>
   );
@@ -1030,7 +1320,8 @@ function AdminOrders({
 function downloadOrdersCsv(orders: Order[], profileById: Map<string, Profile>, name: string) {
   const header = [
     "Order", "Placed", "Customer", "Phone", "City", "Status", "Rider", "Payment",
-    "Subtotal", "Distance km", "Checkout fee", "Fee", "Fee note", "Discount", "Total",
+    "Payment status", "GCash ref", "GCash received",
+    "Subtotal", "Distance km", "Checkout fee", "Fee", "Fee note", "Voucher", "Discount", "Total",
   ];
   const rows = orders.map((o) => [
     o.code,
@@ -1041,11 +1332,15 @@ function downloadOrdersCsv(orders: Order[], profileById: Map<string, Profile>, n
     statusLabel[o.status],
     (o.rider_id && profileById.get(o.rider_id)?.full_name) || "",
     o.payment_method,
+    o.payment_status ?? "",
+    o.gcash_reference ?? "",
+    o.paid_amount ?? "",
     o.subtotal,
     o.delivery_km ?? "",
     o.quoted_delivery_fee ?? o.delivery_fee,
     o.delivery_fee,
     o.delivery_fee_note ?? "",
+    o.voucher_code ?? "",
     o.discount,
     o.total,
   ]);
@@ -1100,7 +1395,7 @@ function AdminRiders({
         <div>
           <h2>Rider management</h2>
           <p>
-            Approve new riders, see who's online and what each rider is delivering.
+            Approve new riders, see who's available and what each rider is delivering.
             {pending > 0 && ` ${pending} awaiting approval.`}
           </p>
         </div>
@@ -1168,7 +1463,7 @@ function AdminRiders({
                     <Status value={r.rider_approved ? "Approved" : "Pending review"} />
                   </td>
                   <td>
-                    <Status value={r.rider_approved && r.rider_online ? "Online" : "Offline"} />
+                    <Status value={r.rider_approved && r.rider_online ? "Available" : "Unavailable"} />
                   </td>
                   <td>
                     {job ? (
@@ -1228,30 +1523,44 @@ const emptyProduct: Omit<Product, "id"> = {
   active: true,
 };
 
+/** Available products under LOW_STOCK units: listed first and highlighted. */
+const isLow = (p: Product) => p.active !== false && p.stock < LOW_STOCK;
+
+const productStatus = (p: Product) =>
+  p.active === false ? "Unavailable" : p.stock === 0 ? "Out of stock" : p.stock < LOW_STOCK ? "Low stock" : "Available";
+
 function AdminProducts({
   products,
+  statusFilter,
+  setStatusFilter,
   reload,
   notify,
 }: {
   products: Product[];
+  statusFilter: string;
+  setStatusFilter: (v: string) => void;
   reload: () => Promise<unknown>;
   notify: Notify;
 }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All categories");
-  const [statusFilter, setStatusFilter] = useState("All status");
   const [editing, setEditing] = useState<Product | Omit<Product, "id"> | null>(null);
   const [busy, setBusy] = useState(false);
+  const [switching, setSwitching] = useState<number | null>(null);
+  const low = products.filter(isLow);
 
-  const filtered = products.filter(
-    (p) =>
-      p.name.toLowerCase().includes(query.toLowerCase()) &&
-      (category === "All categories" || p.category === category) &&
-      (statusFilter === "All status" ||
-        (statusFilter === "Active" && p.active !== false) ||
-        (statusFilter === "Hidden" && p.active === false) ||
-        (statusFilter === "Low stock" && p.stock < LOW_STOCK)),
-  );
+  const filtered = products
+    .filter(
+      (p) =>
+        p.name.toLowerCase().includes(query.toLowerCase()) &&
+        (category === "All categories" || p.category === category) &&
+        (statusFilter === "All status" ||
+          (statusFilter === "Available" && p.active !== false) ||
+          (statusFilter === "Unavailable" && p.active === false) ||
+          (statusFilter === "Low stock" && isLow(p))),
+    )
+    // Low stock on top, emptiest first; the rest keep catalog order.
+    .sort((a, b) => Number(isLow(b)) - Number(isLow(a)) || (isLow(a) ? a.stock - b.stock : 0) || a.id - b.id);
 
   const save = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -1282,14 +1591,17 @@ function AdminProducts({
     }
   };
 
-  const remove = async (p: Product) => {
-    if (!window.confirm(`Delete ${p.name}? Past orders keep their copy of the item.`)) return;
+  const toggleAvailable = async (p: Product) => {
+    const next = p.active === false;
+    setSwitching(p.id);
     try {
-      await deleteProduct(p.id);
+      await setProductAvailable(p.id, next);
       await reload();
-      notify("Product deleted");
+      notify(next ? `${p.name} is available to customers` : `${p.name} is now unavailable to customers`);
     } catch (err) {
       notify(errorMessage(err), "error");
+    } finally {
+      setSwitching(null);
     }
   };
 
@@ -1298,12 +1610,35 @@ function AdminProducts({
       <div className="admin-page-head">
         <div>
           <h2>Product management</h2>
-          <p>Manage food, groceries, pricing and availability. Changes go live immediately.</p>
+          <p>
+            Manage meals, groceries, prices, stock and availability. Stock drops when customers order and comes back when
+            an order is cancelled.
+          </p>
         </div>
         <button className="button button-primary" onClick={() => setEditing({ ...emptyProduct })}>
-          <Icon name="plus" /> Add product
+          <Icon name="plus" /> <span>Add product</span>
         </button>
       </div>
+      {low.length > 0 && (
+        <div className="inventory-alert">
+          <Icon name="stock" />
+          <div>
+            <strong>
+              {low.length} product{low.length === 1 ? " is" : "s are"} low on stock
+            </strong>
+            <p>
+              {low
+                .slice(0, 4)
+                .map((p) => `${p.name} (${p.stock === 0 ? "sold out" : `${p.stock} left`})`)
+                .join(", ")}
+              {low.length > 4 ? ` and ${low.length - 4} more` : ""}. They're listed first.
+            </p>
+          </div>
+          <button onClick={() => setStatusFilter(statusFilter === "Low stock" ? "All status" : "Low stock")}>
+            {statusFilter === "Low stock" ? "Show all" : "Only low stock"}
+          </button>
+        </div>
+      )}
       <div className="admin-filters">
         <SearchBar placeholder="Search products..." value={query} onChange={setQuery} />
         <select value={category} onChange={(e) => setCategory(e.target.value)} aria-label="Category">
@@ -1314,13 +1649,13 @@ function AdminProducts({
         </select>
         <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Status">
           <option>All status</option>
-          <option>Active</option>
-          <option>Hidden</option>
+          <option>Available</option>
+          <option>Unavailable</option>
           <option>Low stock</option>
         </select>
       </div>
       <section className="panel admin-table-wrap">
-        <table className="admin-table">
+        <table className="admin-table product-table">
           <thead>
             <tr>
               <th>Product</th>
@@ -1332,38 +1667,59 @@ function AdminProducts({
             </tr>
           </thead>
           <tbody>
-            {filtered.map((p) => (
-              <tr key={p.id}>
-                <td>
-                  <div className="table-product">
-                    <img src={p.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
-                    <div>
-                      <strong>{p.name}</strong>
-                      <small>#PRD-{String(p.id).padStart(4, "0")}</small>
-                    </div>
-                  </div>
-                </td>
-                <td>
-                  {p.category}
-                  <small>{p.type}</small>
-                </td>
-                <td>
-                  <strong>{money(p.price)}</strong>
-                </td>
-                <td>{p.stock}</td>
-                <td>
-                  <Status value={p.active === false ? "Hidden" : p.stock === 0 ? "Out of stock" : p.stock < LOW_STOCK ? "Low stock" : "Active"} />
-                </td>
-                <td>
-                  <div className="table-actions">
-                    <button onClick={() => setEditing(p)}>Edit</button>
-                    <button className="danger" onClick={() => void remove(p)}>
-                      Delete
-                    </button>
-                  </div>
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={6} className="empty-cell">
+                  No products match these filters.
                 </td>
               </tr>
-            ))}
+            )}
+            {filtered.map((p) => {
+              const available = p.active !== false;
+              return (
+                <tr key={p.id} className={isLow(p) ? (p.stock === 0 ? "row-out" : "row-low") : available ? "" : "row-off"}>
+                  <td>
+                    <div className="table-product">
+                      <img src={p.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
+                      <div>
+                        <strong>{p.name}</strong>
+                        <small>#PRD-{String(p.id).padStart(4, "0")}</small>
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    {p.category}
+                    <small>{p.type === "food" ? "Meal" : "Product"}</small>
+                  </td>
+                  <td>
+                    <strong>{money(p.price)}</strong>
+                  </td>
+                  <td>
+                    <StockEditor product={p} reload={reload} notify={notify} />
+                    {isLow(p) && <small className="stock-note">{p.stock === 0 ? "Sold out" : `Only ${p.stock} left`}</small>}
+                  </td>
+                  <td>
+                    <Status value={productStatus(p)} />
+                  </td>
+                  <td>
+                    <div className="table-actions">
+                      <button onClick={() => setEditing(p)}>Edit</button>
+                      <button
+                        className={`avail-toggle ${available ? "on" : ""}`}
+                        role="switch"
+                        aria-checked={available}
+                        aria-label={`${p.name} available to customers`}
+                        disabled={switching === p.id}
+                        onClick={() => void toggleAvailable(p)}
+                      >
+                        <span />
+                        {available ? "Available" : "Unavailable"}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </section>
@@ -1395,8 +1751,8 @@ function AdminProducts({
               <label>
                 Type
                 <select name="type" defaultValue={editing.type}>
-                  <option value="food">Food</option>
-                  <option value="grocery">Grocery</option>
+                  <option value="food">Meal</option>
+                  <option value="grocery">Product (grocery)</option>
                 </select>
               </label>
               <label>
@@ -1412,7 +1768,7 @@ function AdminProducts({
                 <input name="rating" type="number" min="0" max="5" step="0.1" defaultValue={editing.rating} />
               </label>
               <label className="check-label product-active">
-                <input name="active" type="checkbox" defaultChecked={editing.active !== false} /> Visible to customers
+                <input name="active" type="checkbox" defaultChecked={editing.active !== false} /> Available to customers
               </label>
               <label className="full-field">
                 Image URL
@@ -1521,288 +1877,6 @@ function AdminCustomers({
           </tbody>
         </table>
       </section>
-    </>
-  );
-}
-
-// ------------------------------------------------------------------ inventory
-
-function AdminInventory({
-  products,
-  reload,
-  notify,
-}: {
-  products: Product[];
-  reload: () => Promise<unknown>;
-  notify: Notify;
-}) {
-  const [onlyLow, setOnlyLow] = useState(false);
-  const [drafts, setDrafts] = useState<Record<number, string>>({});
-  const low = products.filter((p) => p.stock < LOW_STOCK);
-  const rows = onlyLow ? low : products;
-
-  const update = async (p: Product) => {
-    const value = Number(drafts[p.id] ?? p.stock);
-    if (!Number.isInteger(value) || value < 0) {
-      notify("Stock must be a whole number, 0 or more");
-      return;
-    }
-    try {
-      await setProductStock(p.id, value);
-      await reload();
-      setDrafts(({ [p.id]: _, ...rest }) => rest);
-      notify(`${p.name} stock set to ${value}`);
-    } catch (e) {
-      notify(errorMessage(e), "error");
-    }
-  };
-
-  return (
-    <>
-      <div className="admin-page-head">
-        <div>
-          <h2>Inventory management</h2>
-          <p>Stock drops automatically when customers order and returns when orders are cancelled.</p>
-        </div>
-      </div>
-      {low.length > 0 && (
-        <div className="inventory-alert">
-          <Icon name="bell" />
-          <div>
-            <strong>
-              {low.length} product{low.length === 1 ? "" : "s"} need your attention
-            </strong>
-            <p>Low-stock items may become unavailable soon.</p>
-          </div>
-          <button onClick={() => setOnlyLow(!onlyLow)}>{onlyLow ? "Show all" : "Review low stock"}</button>
-        </div>
-      )}
-      <section className="panel admin-table-wrap">
-        <table className="admin-table">
-          <thead>
-            <tr>
-              <th>Product</th>
-              <th>Category</th>
-              <th>Current stock</th>
-              <th>Availability</th>
-              <th>Stock status</th>
-              <th>Update</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((p) => (
-              <tr key={p.id}>
-                <td>
-                  <div className="table-product">
-                    <img src={p.image || FALLBACK_IMAGE} alt="" onError={imgFallback} />
-                    <strong>{p.name}</strong>
-                  </div>
-                </td>
-                <td>{p.category}</td>
-                <td>
-                  <strong>{p.stock} units</strong>
-                </td>
-                <td>{p.active === false ? "Hidden" : p.stock > 0 ? "Available" : "Unavailable"}</td>
-                <td>
-                  <Status value={p.stock === 0 ? "Out of stock" : p.stock < LOW_STOCK ? "Low stock" : "In stock"} />
-                </td>
-                <td>
-                  <div className="stock-edit">
-                    <input
-                      type="number"
-                      min="0"
-                      value={drafts[p.id] ?? String(p.stock)}
-                      onChange={(e) => setDrafts({ ...drafts, [p.id]: e.target.value })}
-                      aria-label={`Stock for ${p.name}`}
-                    />
-                    <button onClick={() => void update(p)}>Update</button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-    </>
-  );
-}
-
-// ------------------------------------------------------------------ reports
-
-function AdminReports({
-  orders,
-  products,
-  customers,
-  riders,
-  notify,
-}: {
-  orders: Order[];
-  products: Product[];
-  customers: Profile[];
-  riders: Profile[];
-  notify: Notify;
-}) {
-  const [period, setPeriod] = useState("This month");
-  const scoped = inRange(orders, period);
-  const revenue = revenueOf(scoped);
-  const paid = scoped.filter((o) => o.status !== "cancelled");
-  const delivered = scoped.filter((o) => o.status === "delivered");
-  const cancelled = scoped.filter((o) => o.status === "cancelled");
-  const inProgress = scoped.filter((o) => activeStatuses.includes(o.status));
-  const closed = delivered.length + cancelled.length;
-  const newCustomers = customers.filter((c) => new Date(c.created_at).getTime() >= rangeStart(period));
-  const range = period === "This year" ? "Year" : period === "This month" ? "30 days" : "7 days";
-  const buckets = revenueBuckets(orders, products, range);
-  const food = buckets.reduce((s, b) => s + b.food, 0);
-  const grocery = buckets.reduce((s, b) => s + b.grocery, 0);
-  const foodPct = food + grocery ? Math.round((food / (food + grocery)) * 100) : 50;
-  const profileById = new Map(riders.map((r) => [r.id, r]));
-  const riderRows = riders
-    .map((r) => {
-      const mine = scoped.filter((o) => o.rider_id === r.id && o.status === "delivered");
-      return { rider: r, count: mine.length, fees: mine.reduce((s, o) => s + Number(o.delivery_fee), 0) };
-    })
-    .filter((r) => r.count > 0)
-    .sort((a, b) => b.count - a.count);
-
-  return (
-    <>
-      <div className="admin-page-head">
-        <div>
-          <h2>Sales & reports</h2>
-          <p>Revenue, product mix and fulfilment, computed from live orders.</p>
-        </div>
-        <div className="report-actions">
-          <select value={period} onChange={(e) => setPeriod(e.target.value)} aria-label="Report period">
-            <option>This week</option>
-            <option>This month</option>
-            <option>This year</option>
-          </select>
-          <button
-            className="button button-primary"
-            onClick={() => {
-              downloadOrdersCsv(scoped, profileById, period.toLowerCase().replace(/\s+/g, "-"));
-              notify(`${period} report downloaded`);
-            }}
-          >
-            Download report
-          </button>
-        </div>
-      </div>
-      <div className="report-kpis">
-        <div>
-          <small>TOTAL REVENUE</small>
-          <strong>{money(revenue)}</strong>
-          <span>{paid.length} paid orders</span>
-        </div>
-        <div>
-          <small>AVERAGE ORDER</small>
-          <strong>{money(paid.length ? revenue / paid.length : 0)}</strong>
-          <span>Excluding cancelled</span>
-        </div>
-        <div>
-          <small>ORDERS DELIVERED</small>
-          <strong>{delivered.length}</strong>
-          <span>{closed ? Math.round((delivered.length / closed) * 100) : 0}% of closed orders</span>
-        </div>
-        <div>
-          <small>NEW CUSTOMERS</small>
-          <strong>{newCustomers.length}</strong>
-          <span>{period.toLowerCase()}</span>
-        </div>
-      </div>
-      <div className="reports-grid">
-        <section className="panel">
-          <div className="panel-title">
-            <div>
-              <h3>Revenue trend</h3>
-              <p>{period} · food vs grocery</p>
-            </div>
-          </div>
-          <SalesChart buckets={buckets} />
-        </section>
-        <section className="panel donut-panel">
-          <div className="panel-title">
-            <div>
-              <h3>Food vs grocery sales</h3>
-              <p>Sales category distribution</p>
-            </div>
-          </div>
-          <div
-            className="donut"
-            style={{ background: `conic-gradient(var(--pink) 0 ${foodPct}%, #f1b5c5 ${foodPct}%)` }}
-          >
-            <div>
-              <strong>{money(food + grocery).replace(/\.00$/, "")}</strong>
-              <small>Item sales</small>
-            </div>
-          </div>
-          <div className="donut-legend">
-            <span>
-              <i />
-              Food <strong>{foodPct}%</strong>
-            </span>
-            <span>
-              <i />
-              Grocery <strong>{100 - foodPct}%</strong>
-            </span>
-          </div>
-        </section>
-      </div>
-      <div className="reports-grid small">
-        <section className="panel">
-          <div className="panel-title">
-            <div>
-              <h3>Order statistics</h3>
-              <p>Fulfilment overview</p>
-            </div>
-          </div>
-          <div className="order-stat-list">
-            <div>
-              <span className="dot green" />
-              <p>
-                <strong>{delivered.length}</strong>
-                <small>Delivered</small>
-              </p>
-            </div>
-            <div>
-              <span className="dot yellow" />
-              <p>
-                <strong>{inProgress.length}</strong>
-                <small>In progress</small>
-              </p>
-            </div>
-            <div>
-              <span className="dot red" />
-              <p>
-                <strong>{cancelled.length}</strong>
-                <small>Cancelled</small>
-              </p>
-            </div>
-          </div>
-        </section>
-        <section className="panel">
-          <div className="panel-title">
-            <div>
-              <h3>Rider performance</h3>
-              <p>Deliveries completed · {period.toLowerCase()}</p>
-            </div>
-          </div>
-          {riderRows.length === 0 ? (
-            <p className="muted small-note">No completed deliveries in this period.</p>
-          ) : (
-            riderRows.map(({ rider, count, fees }, i) => (
-              <div className="faq-item" key={rider.id}>
-                <b>{i + 1}</b>
-                <span>{rider.full_name}</span>
-                <small>
-                  {count} delivered · {money(fees)}
-                </small>
-              </div>
-            ))
-          )}
-        </section>
-      </div>
     </>
   );
 }
@@ -2180,6 +2254,7 @@ function AdminSettings({
     </form>
     <StoreLocationPanel notify={notify} />
     <DeliveryFeePanel notify={notify} />
+    <GcashSettingsPanel notify={notify} />
     </>
   );
 }

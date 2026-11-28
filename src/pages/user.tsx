@@ -14,13 +14,16 @@ import {
   money,
 } from "../shared";
 import {
+  CheckedVoucher,
   CheckoutDetails,
   cancelOrder,
+  checkVoucher,
   fetchActiveSuggestionTexts,
   fetchOrder,
   fetchOrders,
   fetchProducts,
   fetchProfile,
+  fetchVouchers,
   logChat,
   askAilynAI,
   type AiChatTurn,
@@ -34,6 +37,7 @@ import { errorMessage } from "../lib/supabase";
 import {
   Order,
   Profile,
+  Voucher,
   activeStatuses,
   formatDateTime,
   formatTime,
@@ -43,12 +47,21 @@ import {
   trackingStages,
 } from "../lib/types";
 import { OrderDetailsModal, OrderItemsList, OrderMap } from "../components/OrderDetails";
+import { DeliveryProofView } from "../components/DeliveryProof";
+import { GcashPayCard, PaymentOptions, PaymentTag } from "../components/GcashPayment";
+import { paymentLabel, paymentState } from "../lib/gcash";
 import { LocationPicker } from "../components/Maps";
 import { LatLng, geocodeOrderAddress, toLatLng, useGeocodedAddress, useStoreSettings } from "../lib/geo";
 import { describeFeeRule, feeRule, formatKm, hasFeeRule, useDeliveryQuote } from "../lib/fees";
-
-// Keep in sync with place_order() in the migrations.
-const WELCOME_DISCOUNT = 30;
+import {
+  WELCOME_DISCOUNT,
+  describeDiscount,
+  manilaToday,
+  normalizeCode,
+  validCode,
+  voucherDiscount,
+  voucherFinePrint,
+} from "../lib/vouchers";
 
 const priceRanges = [
   { id: "any", label: "Any price", min: 0, max: Infinity },
@@ -100,6 +113,8 @@ export function CustomerApp({
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
   const [dialog, setDialog] = useState<{ title: string; message: string } | null>(null);
+  // Vouchers running today (RLS hides coupons and other days). null: vouchers aren't set up yet.
+  const [vouchers, setVouchers] = useState<Voucher[] | null>(null);
   // The saved address lives on the profile (all devices); localStorage is only a fallback.
   const [address, setAddress] = useState<SavedAddress>(() =>
     profile.address
@@ -139,6 +154,18 @@ export function CustomerApp({
     [{ table: "orders", filter: `customer_id=eq.${profile.id}` }],
     loadOrders,
   );
+
+  const loadVouchers = useCallback(() => {
+    fetchVouchers()
+      .then(setVouchers)
+      .catch(() => setVouchers((v) => v ?? [])); // the shop works without them
+  }, []);
+  useEffect(loadVouchers, [loadVouchers]);
+  useRealtime("customer-vouchers", vouchers === null ? [] : [{ table: "vouchers" }], loadVouchers);
+  // The database already returns only today's vouchers; this also drops one that ends while the app is open.
+  const today = manilaToday();
+  const running =
+    vouchers?.filter((v) => v.kind === "voucher" && v.active && v.starts_on <= today && today <= v.ends_on) ?? null;
 
   useEffect(() => writeJson(cartKey, cart), [cart, cartKey]);
   useEffect(() => writeJson(addressKey, address), [address, addressKey]);
@@ -253,6 +280,7 @@ export function CustomerApp({
                 onSearch={searchFromHome}
                 activeOrder={activeOrders[0]}
                 onTrack={track}
+                vouchers={running ?? []}
               />
             )}
             {(page === "food" || page === "grocery") && (
@@ -292,7 +320,8 @@ export function CustomerApp({
           <Checkout
             cart={cart}
             subtotal={subtotal}
-            discount={discount}
+            welcome={discount}
+            vouchers={running}
             profile={profile}
             address={address}
             navigate={navigate}
@@ -334,6 +363,7 @@ export function CustomerApp({
       {chatOpen && (
         <Chatbot
           products={products}
+          vouchers={running ?? []}
           hasActiveOrder={activeOrders.length > 0}
           onTrack={() => {
             setChatOpen(false);
@@ -461,6 +491,7 @@ export function Home({
   onSearch,
   activeOrder,
   onTrack,
+  vouchers = [],
 }: {
   products: Product[];
   navigate: (p: Page) => void;
@@ -471,6 +502,8 @@ export function Home({
   onSearch: () => void;
   activeOrder?: Order;
   onTrack: (id: string) => void;
+  /** Vouchers running today. */
+  vouchers?: Voucher[];
 }) {
   const food = products.filter((p) => p.type === "food").slice(0, 4);
   const grocery = products.filter((p) => p.type === "grocery").slice(0, 4);
@@ -511,6 +544,21 @@ export function Home({
         </div>
         <img src="/assets/ailyns-hero.png" alt="Fresh groceries and a warm meal" />
       </section>
+      {vouchers.length > 0 && (
+        <section className="voucher-strip content-width" aria-label="Vouchers today">
+          {vouchers.slice(0, 4).map((v) => (
+            <div className="voucher-ticket" key={v.id}>
+              <Icon name="ticket" size={22} />
+              <div>
+                <small>{v.title}</small>
+                <strong>{describeDiscount(v)}</strong>
+                <span>{voucherFinePrint(v)} · pick it at checkout</span>
+              </div>
+              <b>{v.code}</b>
+            </div>
+          ))}
+        </section>
+      )}
       <div className="mobile-search content-width">
         <SearchBar
           placeholder="Search meals, groceries, stores..."
@@ -1018,6 +1066,8 @@ export function OrderSummary({
   feeText = "Calculating…",
   feeDetail,
   discount,
+  discountLabel = "First order discount",
+  beforeTotal,
   children,
 }: {
   subtotal: number;
@@ -1026,6 +1076,9 @@ export function OrderSummary({
   feeText?: string;
   feeDetail?: string;
   discount: number;
+  discountLabel?: string;
+  /** Shown above the total, e.g. the voucher picker. */
+  beforeTotal?: React.ReactNode;
   children?: React.ReactNode;
 }) {
   return (
@@ -1042,10 +1095,11 @@ export function OrderSummary({
       {feeDetail && <p className="fee-detail">{feeDetail}</p>}
       {discount > 0 && (
         <div className="discount">
-          <span>First order discount</span>
+          <span>{discountLabel}</span>
           <strong>−{money(discount)}</strong>
         </div>
       )}
+      {beforeTotal}
       <div className="summary-total">
         <span>{fee == null ? "Total before delivery" : "Total"}</span>
         <strong>{money(Math.max(0, subtotal + (fee ?? 0) - discount))}</strong>
@@ -1059,7 +1113,8 @@ export function OrderSummary({
 export function Checkout({
   cart,
   subtotal,
-  discount,
+  welcome,
+  vouchers,
   profile,
   address,
   navigate,
@@ -1067,7 +1122,10 @@ export function Checkout({
 }: {
   cart: CartItem[];
   subtotal: number;
-  discount: number;
+  /** The first-order discount this customer gets (0 after their first order). */
+  welcome: number;
+  /** Vouchers running today; null when vouchers aren't set up, which hides the picker. */
+  vouchers: Voucher[] | null;
   profile: Profile;
   address: SavedAddress;
   navigate: (p: Page) => void;
@@ -1089,6 +1147,49 @@ export function Checkout({
   const dropPoint: LatLng | null = pin ?? looked.point;
   const quote = useDeliveryQuote(dropPoint);
   const hasTypedAddress = !!typed.address.trim() && !!typed.city.trim();
+  const fee = quote.status === "ready" || quote.status === "flat" ? quote.fee : null;
+
+  // Voucher or coupon. Checked by the database when applied and again when the order is placed;
+  // the customer gets whichever saves more: the voucher or the first-order discount.
+  const [applied, setApplied] = useState<CheckedVoucher | null>(null);
+  const [voucherBusy, setVoucherBusy] = useState<string | null>(null);
+  const [voucherError, setVoucherError] = useState("");
+  const applyVoucher = async (raw: string) => {
+    const code = normalizeCode(raw);
+    if (!validCode(code)) {
+      setVoucherError("Enter the voucher code, for example XMAS2026.");
+      return;
+    }
+    setVoucherBusy(code);
+    setVoucherError("");
+    try {
+      setApplied(await checkVoucher(code, subtotal, fee));
+    } catch (err) {
+      setVoucherError(errorMessage(err));
+    } finally {
+      setVoucherBusy(null);
+    }
+  };
+  const voucherAmount = applied ? voucherDiscount(applied, subtotal, fee) : 0;
+  const belowMin = !!applied && subtotal < Number(applied.min_spend);
+  const feePending = applied?.discount_type === "free_delivery" && fee == null;
+  const voucherWins = !!applied && !belowMin && (feePending || voucherAmount >= welcome);
+  const discount = voucherWins ? voucherAmount : welcome;
+  const voucherNote: { tone: "good" | "warn"; text: string } | null = !applied
+    ? null
+    : belowMin
+      ? {
+          tone: "warn",
+          text: `Add ${money(Number(applied.min_spend) - subtotal)} more in items to use ${applied.code} (min. spend ${money(Number(applied.min_spend))}).`,
+        }
+      : feePending
+        ? { tone: "good", text: "Free delivery: the fee comes off once it's worked out for your address." }
+        : voucherWins
+          ? { tone: "good", text: `You save ${money(voucherAmount)} with ${applied.code}.` }
+          : {
+              tone: "warn",
+              text: `Your ${money(welcome)} first-order discount saves more, so it's used instead. Keep ${applied.code} for your next order.`,
+            };
 
   const readTyped = (): SavedAddress => {
     const form = formRef.current;
@@ -1177,6 +1278,7 @@ export function Checkout({
         cart.map((item) => ({ product_id: item.id, quantity: item.quantity })),
         details,
         dropOff,
+        voucherWins ? applied?.code : null,
       );
       onPlaced(order, details);
     } catch (err) {
@@ -1312,22 +1414,7 @@ export function Checkout({
                 <p>Choose how you'd like to pay.</p>
               </div>
             </div>
-            <div className="payment-options">
-              <button type="button" className={payment === "cod" ? "active" : ""} onClick={() => setPayment("cod")}>
-                <span className="radio" />
-                <div>
-                  <strong>Cash on delivery</strong>
-                  <small>Pay the rider when your order arrives</small>
-                </div>
-              </button>
-              <button type="button" className={payment === "gcash" ? "active" : ""} onClick={() => setPayment("gcash")}>
-                <span className="radio" />
-                <div>
-                  <strong>GCash</strong>
-                  <small>Pay the rider via GCash on arrival</small>
-                </div>
-              </button>
-            </div>
+            <PaymentOptions value={payment} onChange={setPayment} />
           </div>
         </section>
         <OrderSummary
@@ -1354,6 +1441,23 @@ export function Checkout({
                 : undefined
           }
           discount={discount}
+          discountLabel={voucherWins && applied ? `Voucher ${applied.code}` : "First order discount"}
+          beforeTotal={
+            vouchers !== null && (
+              <VoucherBox
+                vouchers={vouchers}
+                applied={applied}
+                note={voucherNote}
+                busyCode={voucherBusy}
+                error={voucherError}
+                onApply={(code) => void applyVoucher(code)}
+                onRemove={() => {
+                  setApplied(null);
+                  setVoucherError("");
+                }}
+              />
+            )
+          }
         >
           <div className="summary-items">
             {cart.slice(0, 3).map((item) => (
@@ -1374,6 +1478,94 @@ export function Checkout({
         </OrderSummary>
       </div>
     </form>
+  );
+}
+
+/** Vouchers running today to tap, or a coupon code to type, inside the checkout summary. */
+function VoucherBox({
+  vouchers,
+  applied,
+  note,
+  busyCode,
+  error,
+  onApply,
+  onRemove,
+}: {
+  vouchers: Voucher[];
+  applied: CheckedVoucher | null;
+  note: { tone: "good" | "warn"; text: string } | null;
+  busyCode: string | null;
+  error: string;
+  onApply: (code: string) => void;
+  onRemove: () => void;
+}) {
+  const [code, setCode] = useState("");
+  // This sits inside the checkout form, so Enter must apply the code, not place the order.
+  const apply = () => {
+    if (code.trim()) onApply(code);
+  };
+  const typing = busyCode != null && !vouchers.some((v) => v.code === busyCode);
+  return (
+    <section className="voucher-box" aria-label="Vouchers">
+      <p className="voucher-box-head">
+        <Icon name="ticket" size={17} /> Vouchers & coupons
+      </p>
+      {applied ? (
+        <div className="voucher-applied">
+          <span className="voucher-code">{applied.code}</span>
+          <span>
+            <strong>{applied.title}</strong>
+            <small>{describeDiscount(applied)}</small>
+          </span>
+          <button type="button" onClick={onRemove}>
+            Remove
+          </button>
+        </div>
+      ) : (
+        <>
+          {vouchers.map((v) => (
+            <button
+              type="button"
+              className="voucher-option"
+              key={v.id}
+              disabled={busyCode != null}
+              onClick={() => onApply(v.code)}
+            >
+              <span className="voucher-code">{v.code}</span>
+              <span>
+                <strong>
+                  {v.title} · {describeDiscount(v)}
+                </strong>
+                <small>{voucherFinePrint(v)}</small>
+              </span>
+              <b>{busyCode === v.code ? "…" : "Use"}</b>
+            </button>
+          ))}
+          <span className="coupon-row">
+            <input
+              value={code}
+              maxLength={20}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  apply();
+                }
+              }}
+              placeholder="Have a coupon code?"
+              aria-label="Coupon code"
+              autoCapitalize="characters"
+              autoComplete="off"
+            />
+            <button type="button" onClick={apply} disabled={!code.trim() || busyCode != null}>
+              {typing ? "Checking…" : "Apply"}
+            </button>
+          </span>
+        </>
+      )}
+      {note && <small className={`voucher-note ${note.tone}`}>{note.text}</small>}
+      {error && <small className="voucher-note bad">{error}</small>}
+    </section>
   );
 }
 
@@ -1401,7 +1593,9 @@ export function Confirmation({
       <p>
         Your order <strong>#{order.code}</strong> was sent to the store. Total{" "}
         <strong>{money(Number(order.total))}</strong>.
+        {paymentState(order) === "unpaid" && " Pay it with GCash below so the store can confirm your order."}
       </p>
+      <GcashPayCard order={order} />
       <div className="eta-card">
         <small>ESTIMATED DELIVERY</small>
         <strong>
@@ -1505,6 +1699,9 @@ export function Tracking({
           </strong>
         </div>
       </div>
+      <div className="tracking-pay">
+        <GcashPayCard order={order} />
+      </div>
       <div className="tracking-layout">
         <section className="tracking-card">
           <OrderMap order={order} rider={rider} height={360} />
@@ -1550,16 +1747,21 @@ export function Tracking({
           )}
         </aside>
       </div>
+      {!!order.proof_photos?.length && (
+        <section className="tracking-proof">
+          <DeliveryProofView order={order} />
+        </section>
+      )}
       <section className="ordered-items">
         <div>
           <h2>Order details</h2>
           <p>
-            {itemsSummary(order.order_items)} · {money(Number(order.total))} ·{" "}
-            {order.payment_method === "cod" ? "Cash on delivery" : "GCash"}
+            {itemsSummary(order.order_items)} · {money(Number(order.total))} · {paymentLabel(order)}
           </p>
         </div>
         <div className="ordered-actions">
-          {order.status === "pending" && (
+          {/* Once a GCash payment is sent, only the store can cancel (and refund). */}
+          {order.status === "pending" && !["submitted", "verified"].includes(paymentState(order)) && (
             <button
               className="button button-outline"
               onClick={async () => {
@@ -1629,7 +1831,9 @@ export function MemberOrders({
                 </div>
                 <p>{(order.order_items ?? []).map((i) => `${i.quantity}× ${i.name}`).join(", ")}</p>
                 <div className="member-order-footer">
-                  <strong>{money(Number(order.total))}</strong>
+                  <strong>
+                    {money(Number(order.total))} {order.payment_status && <PaymentTag order={order} short />}
+                  </strong>
                   <div>
                     {active && (
                       <button className="button button-primary" onClick={() => onTrack(order.id)}>
@@ -1894,12 +2098,15 @@ const STOPWORDS = new Set(
 
 export function Chatbot({
   products,
+  vouchers = [],
   hasActiveOrder,
   onTrack,
   onClose,
   openProduct,
 }: {
   products: Product[];
+  /** Vouchers running today. */
+  vouchers?: Voucher[];
   hasActiveOrder: boolean;
   onTrack: () => void;
   onClose: () => void;
@@ -1960,10 +2167,19 @@ export function Chatbot({
       );
     }
     if (has("discount", "promo", "voucher", "coupon")) {
-      return bot(`Your first order gets ${money(WELCOME_DISCOUNT)} off, applied automatically at checkout.`);
+      const running = vouchers.map((v) => `${v.code} (${v.title}: ${describeDiscount(v)}, ${voucherFinePrint(v)})`);
+      return bot(
+        running.length
+          ? `Vouchers running now: ${running.join("; ")}. Pick one at checkout. Your first order also gets ${money(WELCOME_DISCOUNT)} off, and you get whichever saves more.`
+          : `There are no vouchers running right now. Your first order gets ${money(WELCOME_DISCOUNT)} off, applied automatically at checkout.`,
+      );
     }
     if (has("gcash", "payment", "pay ", "cash", "cod")) {
-      return bot("You can pay cash on delivery, or pay the rider with GCash when your order arrives.");
+      return bot(
+        store.settings?.gcash_qr_path
+          ? "You can pay cash on delivery, or with GCash: right after you place your order, scan our GCash QR on the order page and pay the exact total, then type the reference number and add a screenshot of your receipt. Your order stays pending until the store checks the payment, then it's confirmed."
+          : "You can pay cash on delivery, or pay the rider with GCash when your order arrives.",
+      );
     }
     if (has("how long", "eta", "arrive", "minutes", "how fast")) {
       return bot("Most deliveries arrive in 30–45 minutes. You can follow every step live once you order.");

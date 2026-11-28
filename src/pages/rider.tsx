@@ -8,6 +8,7 @@ import {
   riderUpdateLocation,
   riderUpdateStatus,
   signOut,
+  supportsDeliveryProof,
   updateMyProfile,
   useRealtime,
 } from "../lib/api";
@@ -23,7 +24,9 @@ import {
 } from "../lib/types";
 import { OrderDetailsModal, OrderItemsList, OrderMap } from "../components/OrderDetails";
 import { DeliveryFeeEditor } from "../components/DeliveryFee";
+import { DeliveryProofCapture } from "../components/DeliveryProof";
 import { formatKm } from "../lib/fees";
+import { collectText } from "../lib/gcash";
 
 type Tab = "jobs" | "active" | "history" | "profile";
 const LOCATION_INTERVAL_MS = 10_000;
@@ -161,7 +164,7 @@ export function RiderApp({
     try {
       await updateMyProfile(profile.id, { rider_online: !profile.rider_online });
       setProfile({ ...profile, rider_online: !profile.rider_online });
-      notify(profile.rider_online ? "You're offline" : "You're online and visible to dispatch");
+      notify(profile.rider_online ? "You're set as unavailable" : "You're available and visible to dispatch");
     } catch (e) {
       notify(errorMessage(e), "error");
     }
@@ -200,9 +203,10 @@ export function RiderApp({
               className={`online-toggle ${profile.rider_online ? "on" : ""}`}
               onClick={toggleOnline}
               aria-pressed={profile.rider_online}
+              title={profile.rider_online ? "Tap to stop getting jobs" : "Tap to start getting jobs"}
             >
               <span />
-              {profile.rider_online ? "Online" : "Offline"}
+              {profile.rider_online ? "Available" : "Unavailable"}
             </button>
           )}
           <button className="avatar" onClick={() => setTab("profile")} aria-label="Profile">
@@ -268,9 +272,9 @@ export function RiderApp({
                 {!profile.rider_online && (
                   <div className="rider-hint">
                     <Icon name="bell" />
-                    <span>You're offline. Go online to accept jobs.</span>
+                    <span>You're set as unavailable. Switch to Available to accept jobs.</span>
                     <button className="button button-primary" onClick={toggleOnline}>
-                      Go online
+                      Set as available
                     </button>
                   </div>
                 )}
@@ -312,9 +316,7 @@ export function RiderApp({
                         <div className="job-meta">
                           <span>{(order.order_items ?? []).reduce((n, i) => n + i.quantity, 0)} items</span>
                           <span>
-                            {order.payment_method === "cod"
-                              ? `Collect ${money(Number(order.total))}`
-                              : `GCash · ${money(Number(order.total))}`}
+                            {collectText(order)}
                           </span>
                           <span className="fee">
                             Fee {money(Number(order.delivery_fee))}
@@ -495,9 +497,7 @@ function ActiveDeliveries({
                 <details className="delivery-items">
                   <summary>
                     {(order.order_items ?? []).reduce((n, i) => n + i.quantity, 0)} items ·{" "}
-                    {order.payment_method === "cod"
-                      ? `collect ${money(Number(order.total))} cash`
-                      : `GCash ${money(Number(order.total))}`}
+                    {collectText(order)}
                   </summary>
                   <OrderItemsList order={order} />
                 </details>
@@ -532,7 +532,7 @@ function ActiveDeliveries({
                       </button>
                     </>
                   )}
-                  {order.status === "out_for_delivery" && (
+                  {order.status === "out_for_delivery" && !supportsDeliveryProof(order) && (
                     <button
                       className="button button-primary button-full"
                       disabled={busy}
@@ -545,6 +545,9 @@ function ActiveDeliveries({
                     </button>
                   )}
                 </div>
+                {order.status === "out_for_delivery" && supportsDeliveryProof(order) && (
+                  <DeliveryProofCapture order={order} notify={notify} onDelivered={reload} />
+                )}
               </div>
             </article>
           );
